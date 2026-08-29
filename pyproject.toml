@@ -1,0 +1,40 @@
+[project]
+name = "wikigraph"
+version = "0.1.0"
+description = "Crawl Wikipedia article links and render the result as an interactive graph."
+readme = "README.md"
+authors = [
+    { name = "aeizaguerri", email = "[email removed]" }
+]
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.141.1",
+    "httpx>=0.28.1",
+    "uvicorn>=0.52.4",
+]
+
+[project.scripts]
+wikigraph = "wikigraph.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.9.25,<0.10.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "mypy>=2.3.1",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.mypy]
+strict = true
+files = ["src"]
+
+[[tool.mypy.overrides]]
+module = ["uvicorn.*"]
+ignore_missing_imports = true
