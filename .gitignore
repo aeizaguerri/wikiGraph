@@ -4,3 +4,5 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+frontend/node_modules/
+src/wikigraph/static/prototype-v2/.vite/

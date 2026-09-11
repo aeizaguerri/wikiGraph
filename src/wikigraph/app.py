@@ -29,6 +29,7 @@ from wikigraph.runs import (
 from wikigraph.seed import SeedError, parse_seed
 
 STATIC_DIR = Path(__file__).parent / "static"
+V2_STATIC_DIR = STATIC_DIR / "v2"
 SSE_HEARTBEAT_SECONDS = 15.0
 
 
@@ -184,6 +185,14 @@ def create_app(mediawiki_transport: httpx.AsyncBaseTransport | None = None) -> F
             modularity=communities.modularity,
         )
 
+    # The v2 view is the built bundle; absent until `npm run build` runs.
+    # Strictly before the "/" catch-all: Starlette matches mounts in order.
+    if V2_STATIC_DIR.is_dir():
+        app.mount(
+            "/v2",
+            StaticFiles(directory=str(V2_STATIC_DIR), html=True),
+            name="static-v2",
+        )
     app.mount("/", StaticFiles(directory=str(STATIC_DIR), html=True), name="static")
     return app
 

@@ -1,0 +1,41 @@
+/* wikiGraph v2 — one full-screen dark canvas, nothing else chrome-wise. */
+
+:root {
+  color-scheme: dark;
+  --canvas: #0d1220;
+  --ink: #9db4dc;
+  --edge: #313d5b;
+  --label: #dce4f4;
+  --muted: #93a4c4;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: var(--canvas);
+}
+
+.stage {
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+}
+
+.graph {
+  position: absolute;
+  inset: 0;
+}
+
+.notice {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  margin: 0;
+  max-width: 28rem;
+  text-align: center;
+  color: var(--muted);
+  font: 500 15px/1.5 system-ui, sans-serif;
+}

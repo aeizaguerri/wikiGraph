@@ -1,0 +1,18 @@
+{
+  "name": "wikigraph-frontend",
+  "private": true,
+  "version": "2.0.0",
+  "type": "module",
+  "description": "The wikiGraph v2 graph view: full-screen dark canvas over the crawl API.",
+  "scripts": {
+    "build": "vite build"
+  },
+  "dependencies": {
+    "graphology": "^0.26.0",
+    "graphology-layout-forceatlas2": "^0.10.1",
+    "sigma": "^3.0.3"
+  },
+  "devDependencies": {
+    "vite": "^8.3.0"
+  }
+}
