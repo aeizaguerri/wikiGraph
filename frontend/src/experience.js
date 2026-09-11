@@ -2,17 +2,38 @@ import Graph from "graphology";
 import Sigma from "sigma";
 import forceAtlas2 from "graphology-layout-forceatlas2";
 
-// Placeholder visual constants; the community palette and encodings land in
-// their own tickets (07, 13).
-const NODE_SIZE = 4;
-const NODE_COLOR = "#9db4dc";
+// Encodings (ticket 07): size = degree, color = communityId.
+// The palette is 12 fixed hues — golden angle (137.508°), s 62 / l 58, tuned
+// for the dark canvas — for community ids 0-11; larger ids render neutral
+// gray. Hex only: sigma's WebGL color parser has no hsl() support.
+const COMMUNITY_PALETTE = [
+  "#d65151",
+  "#51d678",
+  "#9f51d6",
+  "#d6c651",
+  "#51c0d6",
+  "#d65199",
+  "#73d651",
+  "#5751d6",
+  "#d67e51",
+  "#51d6a5",
+  "#cb51d6",
+  "#bad651",
+];
+const NEUTRAL_COLOR = "#808080";
+const MIN_NODE_SIZE = 2.5;
+const SIZE_GROWTH = 1.1;
 const EDGE_COLOR = "#313d5b";
 const LABEL_COLOR = "#dce4f4";
 const ZOOM_THRESHOLD = 6;
 
-// Reducers must exist before Sigma construction: the constructor renders.
-const nodeReducer = (node, data) => data;
-const edgeReducer = (edge, data) => data;
+export function communityColor(communityId) {
+  return COMMUNITY_PALETTE[communityId] ?? NEUTRAL_COLOR;
+}
+
+export function nodeSize(degree) {
+  return MIN_NODE_SIZE + SIZE_GROWTH * Math.sqrt(degree);
+}
 
 // A seeded PRNG so identical Graphs lay out identically across boots.
 function mulberry32(seed) {
@@ -34,14 +55,17 @@ function toGraph(graphPayload) {
       label: article.title,
       level: article.level,
       isSeed: article.isSeed,
-      size: NODE_SIZE,
-      color: NODE_COLOR,
+      communityId: article.communityId,
+      color: communityColor(article.communityId),
       x: rng() * 2 - 1,
       y: rng() * 2 - 1,
     });
   }
   for (const link of graphPayload.edges) {
     graph.addEdge(link.source, link.target, { color: EDGE_COLOR });
+  }
+  for (const node of graph.nodes()) {
+    graph.setNodeAttribute(node, "size", nodeSize(graph.degree(node)));
   }
 
   const settings = forceAtlas2.inferSettings(graph);
@@ -51,6 +75,18 @@ function toGraph(graphPayload) {
 
 export function createExperience(graphPayload, container) {
   const graph = toGraph(graphPayload);
+
+  // Reducers must exist before Sigma construction: the constructor renders.
+  // The Seed page stays visually distinguishable at any zoom.
+  const nodeReducer = (node, data) => {
+    const res = { ...data };
+    if (graph.getNodeAttribute(node, "isSeed")) {
+      res.highlighted = true;
+    }
+    return res;
+  };
+  const edgeReducer = (edge, data) => data;
+
   const sigma = new Sigma(graph, container, {
     nodeReducer,
     edgeReducer,
