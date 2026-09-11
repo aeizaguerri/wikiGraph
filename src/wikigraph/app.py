@@ -51,6 +51,7 @@ class GraphNodeOut(CamelModel):
     title: str
     level: int
     is_seed: bool
+    community_id: int
 
 
 class GraphEdgeOut(CamelModel):
@@ -68,6 +69,8 @@ class GraphOut(CamelModel):
     edges: list[GraphEdgeOut]
     crawled: int
     discovered: int
+    community_count: int
+    modularity: float
 
 
 def _error(status: int, code: str, message: str) -> HTTPException:
@@ -146,11 +149,16 @@ def create_app(mediawiki_transport: httpx.AsyncBaseTransport | None = None) -> F
     async def run_graph(run_id: str) -> GraphOut:
         run = _require_run(registry, run_id)
         await run.wait_done()
-        if run.status is RunStatus.FAILED or run.result is None:
+        if (
+            run.status is RunStatus.FAILED
+            or run.result is None
+            or run.communities is None
+        ):
             raise _error(
                 409, "run_failed", run.error or "The crawl run failed."
             )
         result = run.result
+        communities = run.communities
         return GraphOut(
             run_id=run.id,
             seed=run.request.seed,
@@ -158,7 +166,12 @@ def create_app(mediawiki_transport: httpx.AsyncBaseTransport | None = None) -> F
             depth=run.request.depth,
             truncated=result.truncated,
             nodes=[
-                GraphNodeOut(title=node.title, level=node.level, is_seed=node.is_seed)
+                GraphNodeOut(
+                    title=node.title,
+                    level=node.level,
+                    is_seed=node.is_seed,
+                    community_id=communities.ids[node.title],
+                )
                 for node in result.nodes
             ],
             edges=[
@@ -167,6 +180,8 @@ def create_app(mediawiki_transport: httpx.AsyncBaseTransport | None = None) -> F
             ],
             crawled=result.crawled,
             discovered=result.discovered,
+            community_count=communities.count,
+            modularity=communities.modularity,
         )
 
     app.mount("/", StaticFiles(directory=str(STATIC_DIR), html=True), name="static")

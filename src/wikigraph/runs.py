@@ -10,6 +10,7 @@ from typing import Any
 
 import httpx
 
+from wikigraph.communities import CommunityAssignment, detect_communities
 from wikigraph.crawler import CrawlRequest, Crawler, CrawlResult, Progress
 
 
@@ -41,6 +42,7 @@ class CrawlRun:
         self.truncated = False
         self.error: str | None = None
         self.result: CrawlResult | None = None
+        self.communities: CommunityAssignment | None = None
         self.task: asyncio.Task[None] | None = None
         self._events: list[RunEvent] = []
         self._subscribers: list[asyncio.Queue[RunEvent]] = []
@@ -72,6 +74,9 @@ class CrawlRun:
             )
             result = await crawler.crawl()
             self.result = result
+            self.communities = await asyncio.to_thread(
+                detect_communities, result.nodes, result.edges
+            )
             self.truncated = result.truncated
             self.status = RunStatus.COMPLETED
             self.publish(RunEvent(COMPLETED_EVENT, {"truncated": result.truncated}))
