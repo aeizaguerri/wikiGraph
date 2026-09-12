@@ -19,9 +19,8 @@ from typing import Any
 import httpx
 
 from tests.conftest import boot_view, completed_run
+from tests.helpers import wait_static
 from tests.stub import FakeMediaWiki
-
-STATIC_WAIT = 14_000
 
 STATE_SPOTLIGHT_JS = "() => window.__wikigraph.getSpotlight()"
 STATE_SELECTED_JS = "() => window.__wikigraph.getSelected()"
@@ -81,12 +80,6 @@ def populate(stub: FakeMediaWiki) -> None:
     stub.add_page("Historia")
     stub.add_page("Selva")
     stub.add_page("Física")
-
-
-async def wait_static(page: Any) -> None:
-    await page.wait_for_function(
-        "() => window.__wikigraph.getState() === 'static'", timeout=STATIC_WAIT
-    )
 
 
 async def read_card(page: Any) -> dict[str, Any]:

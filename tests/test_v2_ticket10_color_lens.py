@@ -17,7 +17,7 @@ from typing import Any
 import httpx
 
 from tests.conftest import boot_view, completed_run
-from tests.helpers import fetch_graph
+from tests.helpers import fetch_graph, wait_static
 from tests.stub import FakeMediaWiki
 
 # The pinned lens contract, mirrored from frontend/src/experience.js:
@@ -83,13 +83,6 @@ LEGEND_STATE_JS = """
 
 # Sampling positions (or pixels) twice only compares like with like once the
 # FA2 settle has ended and the layout is truly frozen.
-STATIC_WAIT = 14_000
-
-
-async def wait_static(page: Any) -> None:
-    await page.wait_for_function(
-        "() => window.__wikigraph.getState() === 'static'", timeout=STATIC_WAIT
-    )
 
 
 def hex_rgb(color: str) -> tuple[int, int, int]:

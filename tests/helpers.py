@@ -9,6 +9,17 @@ import httpx
 
 from wikigraph.runs import TERMINAL_EVENT_TYPES
 
+# FA2 settle is 6 s in the UI contract; the extra headroom covers worker boot
+# under load.
+STATIC_WAIT = 14_000
+
+
+async def wait_static(page: Any) -> None:
+    """The physics contract at rest: the FA2 settle has ended."""
+    await page.wait_for_function(
+        "() => window.__wikigraph.getState() === 'static'", timeout=STATIC_WAIT
+    )
+
 
 async def create_run(
     client: httpx.AsyncClient,

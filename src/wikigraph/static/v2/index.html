@@ -4,8 +4,8 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>wikiGraph</title>
-    <script type="module" crossorigin src="/v2/assets/index-BeQ22gTe.js"></script>
-    <link rel="stylesheet" crossorigin href="/v2/assets/index-BOIPAIa7.css">
+    <script type="module" crossorigin src="/v2/assets/index-Cy57AwWc.js"></script>
+    <link rel="stylesheet" crossorigin href="/v2/assets/index-B4OuCGdN.css">
   </head>
   <body>
     <main id="stage" class="stage">
@@ -29,6 +29,43 @@
       </aside>
       <p id="status" class="status"></p>
       <p id="notice" class="notice"></p>
+      <button id="launch-chip" class="launch-chip" type="button" aria-haspopup="dialog">+ grafo</button>
+      <div id="launch-overlay" class="overlay" hidden>
+        <form id="launch-form" class="overlay-form" aria-label="Launch a new crawl run">
+          <p class="overlay-title">New crawl</p>
+          <input
+            id="launch-seed"
+            class="overlay-seed"
+            name="seed"
+            type="text"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="Seed — title or Wikipedia URL"
+          />
+          <div id="launch-depth" class="chip-row" role="group" aria-label="Depth">
+            <button class="chip" type="button" data-depth="1">1</button>
+            <button class="chip" type="button" data-depth="2" aria-pressed="true">2</button>
+            <button class="chip" type="button" data-depth="3">3</button>
+          </div>
+          <div id="launch-edition" class="chip-row" role="group" aria-label="Language edition">
+            <button class="chip" type="button" data-language="es" aria-pressed="true">ES</button>
+            <button class="chip" type="button" data-language="en">EN</button>
+          </div>
+          <label class="overlay-micro" for="launch-cap">Node cap</label>
+          <input
+            id="launch-cap"
+            class="overlay-cap"
+            name="nodeCap"
+            type="text"
+            inputmode="numeric"
+            autocomplete="off"
+            value="500"
+          />
+          <button id="launch-submit" class="overlay-launch" type="submit">Launch crawl</button>
+          <p id="launch-progress" class="overlay-progress" aria-live="polite" hidden></p>
+          <p id="launch-error" class="overlay-error" role="alert" hidden></p>
+        </form>
+      </div>
     </main>
   </body>
 </html>
