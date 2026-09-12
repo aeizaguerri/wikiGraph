@@ -1,4 +1,7 @@
-import { createExperience } from "./experience.js";
+import {
+  createExperience,
+  parseLens,
+} from "./experience.js";
 import "./style.css";
 
 const container = document.getElementById("graph");
@@ -10,6 +13,10 @@ const cardLevel = document.getElementById("card-level");
 const cardDegree = document.getElementById("card-degree");
 const cardCommunity = document.getElementById("card-community");
 const cardLink = document.getElementById("card-link");
+const lensCommunity = document.getElementById("lens-community");
+const lensLevel = document.getElementById("lens-level");
+const legendTitle = document.getElementById("legend-title");
+const legendEntries = document.getElementById("legend-entries");
 
 const PHYSICS_LABELS = {
   settling: "settling…",
@@ -31,7 +38,42 @@ async function errorMessage(response) {
   return `The request failed (HTTP ${response.status}).`;
 }
 
-const runId = new URLSearchParams(window.location.search).get("run");
+// Color lens (ticket 10): the choice is URL-expressed (?color=community|level)
+// so it is shareable and survives reload; unknown values fall back to the
+// community default.
+const urlParams = new URLSearchParams(window.location.search);
+const runId = urlParams.get("run");
+const initialLens = parseLens(urlParams.get("color"));
+
+function syncUrl(lens) {
+  const url = new URL(window.location.href);
+  url.searchParams.set("color", lens);
+  window.history.replaceState(null, "", url);
+}
+
+function renderLegend(experience) {
+  const legend = experience.legendData();
+  legendTitle.textContent = legend.title;
+  legendEntries.replaceChildren(
+    ...legend.entries.map((entry) => {
+      const item = document.createElement("li");
+      item.className = "legend-entry";
+      const swatch = document.createElement("span");
+      swatch.className = "legend-swatch";
+      swatch.style.backgroundColor = entry.color;
+      const label = document.createElement("span");
+      label.className = "legend-label";
+      label.textContent = entry.label;
+      item.append(swatch, label);
+      return item;
+    }),
+  );
+}
+
+function renderLensButtons(lens) {
+  lensCommunity.setAttribute("aria-pressed", String(lens === "community"));
+  lensLevel.setAttribute("aria-pressed", String(lens === "level"));
+}
 
 if (!runId) {
   showNotice("No Graph in view yet. Launch a crawl run and it will draw itself here.");
@@ -44,6 +86,7 @@ if (!runId) {
       await response.json(),
       container,
       {
+        lens: initialLens,
         onState(state) {
           statusBox.textContent = PHYSICS_LABELS[state] ?? "";
         },
@@ -64,5 +107,19 @@ if (!runId) {
     );
     // Handles handed to the headless-browser seam (screen-level assertions).
     window.__wikigraph = experience;
+
+    syncUrl(experience.getLens());
+    renderLegend(experience);
+    renderLensButtons(experience.getLens());
+    for (const [button, lens] of [
+      [lensCommunity, "community"],
+      [lensLevel, "level"],
+    ]) {
+      button.addEventListener("click", () => {
+        syncUrl(experience.setLens(lens));
+        renderLegend(experience);
+        renderLensButtons(experience.getLens());
+      });
+    }
   }
 }

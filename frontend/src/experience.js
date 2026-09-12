@@ -23,6 +23,10 @@ const COMMUNITY_PALETTE = [
   "#bad651",
 ];
 const NEUTRAL_COLOR = "#808080";
+// Level lens (ticket 10): a 4-step ladder for the depth range 0-3, coolest
+// (brightest on the dark canvas) at the Seed page; levels beyond 3 — which
+// depth > 3 cannot produce — would fall back to the neutral gray.
+const LEVEL_LADDER = ["#f2f6ff", "#a9c3ea", "#5f83ad", "#3a5372"];
 const MIN_NODE_SIZE = 2.5;
 const SIZE_GROWTH = 1.1;
 const EDGE_COLOR = "#313d5b";
@@ -53,6 +57,20 @@ const REHEAT_SETTINGS = {
 
 export function communityColor(communityId) {
   return COMMUNITY_PALETTE[communityId] ?? NEUTRAL_COLOR;
+}
+
+export function levelColor(level) {
+  return LEVEL_LADDER[level] ?? NEUTRAL_COLOR;
+}
+
+// Color lens (ticket 10): community (primary) ⇄ level (secondary). The lens
+// only re-colors nodes through the reducer — it never touches positions, so
+// the settled layout survives the switch. `getLens`/`setLens` are the seam
+// the URL sync and the legend read and drive.
+export const COLOR_LENS_VALUES = ["community", "level"];
+
+export function parseLens(value) {
+  return COLOR_LENS_VALUES.includes(value) ? value : "community";
 }
 
 export function nodeSize(degree) {
@@ -86,7 +104,8 @@ function toGraph(graphPayload) {
       level: article.level,
       isSeed: article.isSeed,
       communityId: article.communityId,
-      color: communityColor(article.communityId),
+      communityColor: communityColor(article.communityId),
+      levelColor: levelColor(article.level),
       x: rng() * 2 - 1,
       y: rng() * 2 - 1,
     });
@@ -111,6 +130,21 @@ export function createExperience(graphPayload, container, options = {}) {
   let pinnedNode = null;
   let hoverNode = null;
   let spotlightNeighbors = new Set();
+
+  // Color lens state (ticket 10): the reducers read it on every refresh.
+  // setLens only runs after Sigma exists (the UI drives it), so referencing
+  // sigma inside is safe despite the declaration order below.
+  let lens = parseLens(options.lens);
+
+  function getLens() {
+    return lens;
+  }
+
+  function setLens(next) {
+    lens = parseLens(next);
+    sigma.refresh();
+    return lens;
+  }
 
   const DIM_NODE = { color: DIM_NODE_COLOR, highlighted: false, label: null };
   const DIM_EDGE = { color: DIM_EDGE_COLOR, size: 1 };
@@ -137,6 +171,8 @@ export function createExperience(graphPayload, container, options = {}) {
   // the spotlight owns the canvas, where it dims like every other bystander.
   const nodeReducer = (node, data) => {
     const res = { ...data };
+    // Lens first: it owns the base color at every zoom level.
+    res.color = lens === "level" ? data.levelColor : data.communityColor;
     if (spotlightNode) {
       const involved = node === spotlightNode || spotlightNeighbors.has(node);
       if (!involved) {
@@ -287,6 +323,58 @@ export function createExperience(graphPayload, container, options = {}) {
     getState: () => physicsState,
     getSpotlight: () => spotlightNode,
     getSelected: () => pinnedNode,
+    getLens,
+    setLens,
+    legendData() {
+      // Shared shape: one entry per distinct encoded value present in the
+      // graph, first-seen color, sorted ascending. The community branch then
+      // folds ids past the 12-hue palette into one gray bucket — a separate
+      // swatch per gray id would map one color to many meanings.
+      const entries = (attr, colorOf, labelOf) => {
+        const values = new Map();
+        for (const node of graph.nodes()) {
+          const value = graph.getNodeAttribute(node, attr);
+          if (!values.has(value)) values.set(value, colorOf(value));
+        }
+        return [...values.entries()]
+          .sort((a, b) => a[0] - b[0])
+          .map(([value, color]) => ({ label: labelOf(value), color }));
+      };
+      if (lens === "level") {
+        return {
+          encoding: "level",
+          title: "Color = level",
+          entries: entries("level", levelColor, (level) => `Level ${level}`),
+        };
+      }
+      const communityEntries = entries(
+        "communityId",
+        communityColor,
+        (communityId) => `Community ${communityId}`,
+      );
+      const paletteEnd = communityEntries.findIndex(
+        (entry) => entry.label === `Community ${COMMUNITY_PALETTE.length}`,
+      );
+      const inPalette = paletteEnd === -1
+        ? communityEntries
+        : communityEntries.slice(0, paletteEnd);
+      const grayIds = paletteEnd === -1
+        ? []
+        : communityEntries.slice(paletteEnd);
+      if (grayIds.length > 0) {
+        inPalette.push({
+          label: grayIds.length === 1
+            ? "Larger communities (gray)"
+            : `Larger communities ×${grayIds.length} (gray)`,
+          color: NEUTRAL_COLOR,
+        });
+      }
+      return {
+        encoding: "community",
+        title: "Color = community",
+        entries: inPalette,
+      };
+    },
     destroy() {
       clearTimeout(settleTimer);
       clearTimeout(decayTimer);

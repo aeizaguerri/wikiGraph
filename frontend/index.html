@@ -8,6 +8,14 @@
   <body>
     <main id="stage" class="stage">
       <div id="graph" class="graph"></div>
+      <nav id="lens" class="lens" aria-label="Color encoding">
+        <button id="lens-community" class="lens-button" type="button">Community</button>
+        <button id="lens-level" class="lens-button" type="button">Level</button>
+      </nav>
+      <aside id="legend" class="legend" aria-live="polite">
+        <p id="legend-title" class="legend-title"></p>
+        <ul id="legend-entries" class="legend-entries"></ul>
+      </aside>
       <aside id="info-card" class="info-card" hidden>
         <h2 id="card-title" class="card-title"></h2>
         <ul class="card-facts">
