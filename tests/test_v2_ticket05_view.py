@@ -39,6 +39,18 @@ INK_JS = """
 })()
 """
 
+EMPTY_POINT_JS = """
+() => {
+  const sigma = window.__wikigraph.sigma;
+  for (let y = 40; y < 900; y += 20) {
+    for (let x = 20; x < 1200; x += 20) {
+      if (!sigma.getNodeAtPosition({ x, y })) return { x, y };
+    }
+  }
+  return null;
+}
+"""
+
 
 def populate(stub: FakeMediaWiki) -> None:
     stub.add_page(
@@ -103,10 +115,13 @@ async def test_wheel_zoom_and_pan_drive_the_camera(
     )
 
     before_state = await camera_state(browser_page)
-    await browser_page.mouse.move(20, 700)
+    # Pan from a node-free screen point: grabbing a node is a node drag, not
+    # a camera pan (ticket 08's physics contract) — Sigma suppresses it.
+    empty_point = await browser_page.evaluate(EMPTY_POINT_JS)
+    await browser_page.mouse.move(empty_point["x"], empty_point["y"])
     await browser_page.mouse.down()
     for step in range(6):
-        await browser_page.mouse.move(20 + step * 160, 660)
+        await browser_page.mouse.move(empty_point["x"] + step * 160, empty_point["y"] - 40)
         await asyncio.sleep(0.02)
     await browser_page.mouse.up()
     await asyncio.sleep(0.5)

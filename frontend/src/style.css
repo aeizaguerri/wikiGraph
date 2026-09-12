@@ -28,6 +28,15 @@ body {
   inset: 0;
 }
 
+.status {
+  position: absolute;
+  left: 16px;
+  bottom: 12px;
+  margin: 0;
+  color: var(--muted);
+  font: 500 12px/1.4 system-ui, sans-serif;
+}
+
 .notice {
   position: absolute;
   left: 50%;

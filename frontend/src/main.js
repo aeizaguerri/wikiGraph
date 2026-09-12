@@ -3,6 +3,13 @@ import "./style.css";
 
 const container = document.getElementById("graph");
 const noticeBox = document.getElementById("notice");
+const statusBox = document.getElementById("status");
+
+const PHYSICS_LABELS = {
+  settling: "settling…",
+  static: "",
+  "re-heating": "re-heating…",
+};
 
 function showNotice(message) {
   noticeBox.textContent = message;
@@ -27,7 +34,15 @@ if (!runId) {
   if (!response.ok) {
     showNotice(await errorMessage(response));
   } else {
-    const experience = createExperience(await response.json(), container);
+    const experience = createExperience(
+      await response.json(),
+      container,
+      {
+        onState(state) {
+          statusBox.textContent = PHYSICS_LABELS[state] ?? "";
+        },
+      },
+    );
     // Handles handed to the headless-browser seam (screen-level assertions).
     window.__wikigraph = experience;
   }
