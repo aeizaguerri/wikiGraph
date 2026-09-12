@@ -35,6 +35,14 @@ const ZOOM_THRESHOLD = 6;
 const SETTLE_MS = 6000;
 const DECAY_MS = 1500;
 const DRAG_TRIGGER_PX = 5;
+
+// Spotlight (ticket 09): hover previews, click pins. Incident edges render
+// muted steel at base thickness (judged on hubs to avoid glare); everything
+// else dims to near-invisibility against the #0d1220 canvas.
+const SPOT_EDGE_COLOR = "#8fa4c0";
+const SPOT_EDGE_SIZE = 1;
+const DIM_NODE_COLOR = "#151b2c";
+const DIM_EDGE_COLOR = "#12182a";
 const REHEAT_SETTINGS = {
   attraction: 0.0002,
   repulsion: 0.06,
@@ -49,6 +57,12 @@ export function communityColor(communityId) {
 
 export function nodeSize(degree) {
   return MIN_NODE_SIZE + SIZE_GROWTH * Math.sqrt(degree);
+}
+
+export function wikipediaUrl(language, title) {
+  return `https://${language}.wikipedia.org/wiki/${encodeURIComponent(
+    title.replaceAll(" ", "_"),
+  )}`;
 }
 
 // A seeded PRNG so identical Graphs lay out identically across boots.
@@ -89,16 +103,64 @@ function toGraph(graphPayload) {
 export function createExperience(graphPayload, container, options = {}) {
   const graph = toGraph(graphPayload);
 
+  // Spotlight focus state: a reducer recipe, not an overlay pass. The node
+  // and edge reducers below are driven entirely by `spotlightNode`.
+  const language = graphPayload.language ?? "es";
+  const onSelection = options.onSelection ?? (() => {});
+  let spotlightNode = null;
+  let pinnedNode = null;
+  let hoverNode = null;
+  let spotlightNeighbors = new Set();
+
+  const DIM_NODE = { color: DIM_NODE_COLOR, highlighted: false, label: null };
+  const DIM_EDGE = { color: DIM_EDGE_COLOR, size: 1 };
+  const SPOT_EDGE = { color: SPOT_EDGE_COLOR, size: SPOT_EDGE_SIZE };
+
+  function setSpotlight(node) {
+    spotlightNode = node;
+    spotlightNeighbors = node ? new Set(graph.neighbors(node)) : new Set();
+    sigma.refresh();
+  }
+
+  function articleInfo(node) {
+    return {
+      title: node,
+      level: graph.getNodeAttribute(node, "level"),
+      degree: graph.degree(node),
+      communityId: graph.getNodeAttribute(node, "communityId"),
+      url: wikipediaUrl(language, node),
+    };
+  }
+
   // Reducers must exist before Sigma construction: the constructor renders.
-  // The Seed page stays visually distinguishable at any zoom.
+  // The Seed page stays visually distinguishable at any zoom — except while
+  // the spotlight owns the canvas, where it dims like every other bystander.
   const nodeReducer = (node, data) => {
     const res = { ...data };
-    if (graph.getNodeAttribute(node, "isSeed")) {
+    if (spotlightNode) {
+      const involved = node === spotlightNode || spotlightNeighbors.has(node);
+      if (!involved) {
+        res.color = DIM_NODE.color;
+        res.highlighted = false;
+        res.label = null;
+      } else if (node === spotlightNode) {
+        res.highlighted = true;
+      }
+    } else if (graph.getNodeAttribute(node, "isSeed")) {
       res.highlighted = true;
     }
     return res;
   };
-  const edgeReducer = (edge, data) => data;
+  const edgeReducer = (edge, data) => {
+    const res = { ...data };
+    if (spotlightNode) {
+      const [source, target] = graph.extremities(edge);
+      const incident = source === spotlightNode || target === spotlightNode;
+      res.color = incident ? SPOT_EDGE.color : DIM_EDGE.color;
+      res.size = incident ? SPOT_EDGE.size : DIM_EDGE.size;
+    }
+    return res;
+  };
 
   const sigma = new Sigma(graph, container, {
     nodeReducer,
@@ -195,10 +257,36 @@ export function createExperience(graphPayload, container, options = {}) {
   mouseCaptor.on("mouseup", release);
   window.addEventListener("mouseup", release);
 
+  // ---- spotlight: hover previews, click pins, backdrop click unpins ----
+  // A pinned selection outranks the transient hover; a click without movement
+  // is a deselect (drags never emit click events).
+  sigma.on("enterNode", (e) => {
+    hoverNode = e.node;
+    if (!pinnedNode) setSpotlight(e.node);
+  });
+  sigma.on("leaveNode", () => {
+    hoverNode = null;
+    if (!pinnedNode) setSpotlight(null);
+  });
+  sigma.on("clickNode", (e) => {
+    if (pinnedNode) return;
+    pinnedNode = e.node;
+    setSpotlight(e.node);
+    onSelection(articleInfo(e.node));
+  });
+  sigma.on("clickStage", () => {
+    if (!pinnedNode) return;
+    pinnedNode = null;
+    setSpotlight(hoverNode);
+    onSelection(null);
+  });
+
   return {
     graph,
     sigma,
     getState: () => physicsState,
+    getSpotlight: () => spotlightNode,
+    getSelected: () => pinnedNode,
     destroy() {
       clearTimeout(settleTimer);
       clearTimeout(decayTimer);

@@ -4,6 +4,12 @@ import "./style.css";
 const container = document.getElementById("graph");
 const noticeBox = document.getElementById("notice");
 const statusBox = document.getElementById("status");
+const infoCard = document.getElementById("info-card");
+const cardTitle = document.getElementById("card-title");
+const cardLevel = document.getElementById("card-level");
+const cardDegree = document.getElementById("card-degree");
+const cardCommunity = document.getElementById("card-community");
+const cardLink = document.getElementById("card-link");
 
 const PHYSICS_LABELS = {
   settling: "settling…",
@@ -40,6 +46,19 @@ if (!runId) {
       {
         onState(state) {
           statusBox.textContent = PHYSICS_LABELS[state] ?? "";
+        },
+        onSelection(info) {
+          if (!info) {
+            infoCard.hidden = true;
+            return;
+          }
+          cardTitle.textContent = info.title;
+          cardLevel.textContent = `Level ${info.level}`;
+          cardDegree.textContent = `${info.degree} links`;
+          cardCommunity.textContent = `Community ${info.communityId}`;
+          cardLink.href = info.url;
+          cardLink.textContent = "Open on Wikipedia";
+          infoCard.hidden = false;
         },
       },
     );

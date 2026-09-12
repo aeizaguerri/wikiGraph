@@ -48,3 +48,46 @@ body {
   color: var(--muted);
   font: 500 15px/1.5 system-ui, sans-serif;
 }
+
+.info-card {
+  position: absolute;
+  right: 16px;
+  top: 16px;
+  z-index: 10;
+  display: block;
+  min-width: 16rem;
+  max-width: 20rem;
+  padding: 14px 16px;
+  background: rgba(16, 22, 38, 0.92);
+  border: 1px solid var(--edge);
+  border-radius: 10px;
+  color: var(--ink);
+  font: 500 13px/1.45 system-ui, sans-serif;
+}
+
+.info-card[hidden] {
+  display: none;
+}
+
+.card-title {
+  margin: 0 0 8px;
+  color: var(--label);
+  font: 600 15px/1.3 system-ui, sans-serif;
+}
+
+.card-facts {
+  margin: 0 0 10px;
+  padding: 0;
+  list-style: none;
+}
+
+.card-facts li::before {
+  content: "—";
+  margin-right: 6px;
+  color: var(--edge);
+}
+
+.card-link {
+  color: var(--ink);
+  font-weight: 600;
+}
