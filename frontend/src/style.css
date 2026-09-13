@@ -314,3 +314,57 @@ body {
   color: #e08d8d;
   font: 500 13px/1.4 system-ui, sans-serif;
 }
+
+/* Ticket 12: the same launcher contract in a compact, in-view strip. */
+.overlay[data-mode="inline"] {
+  inset: auto 16px 52px auto;
+  width: min(52rem, calc(100vw - 32px));
+  padding: 10px 12px;
+  place-items: stretch;
+  background: rgba(16, 22, 38, 0.94);
+  border: 1px solid var(--edge);
+  border-radius: 12px;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+
+.overlay[data-mode="inline"] .overlay-form {
+  display: grid;
+  grid-template-columns: minmax(12rem, 1fr) auto auto 5rem auto;
+  align-items: center;
+  gap: 8px;
+  width: auto;
+  padding: 0;
+}
+
+.overlay[data-mode="inline"] .overlay-title,
+.overlay[data-mode="inline"] .overlay-micro {
+  display: none;
+}
+
+.overlay[data-mode="inline"] .overlay-seed,
+.overlay[data-mode="inline"] .overlay-cap {
+  margin: 0;
+  width: 100%;
+  padding: 5px 0;
+  font-size: 13px;
+}
+
+.overlay[data-mode="inline"] .chip-row {
+  gap: 2px;
+}
+
+.overlay[data-mode="inline"] .chip {
+  padding: 4px 8px;
+}
+
+.overlay[data-mode="inline"] .overlay-launch {
+  margin: 0;
+  padding: 8px 10px;
+  white-space: nowrap;
+}
+
+.overlay[data-mode="inline"] .overlay-progress,
+.overlay[data-mode="inline"] .overlay-error {
+  grid-column: 1 / -1;
+}

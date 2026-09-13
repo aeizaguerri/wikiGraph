@@ -1,7 +1,6 @@
-// Launch form (ticket 11): a boxless full-bleed overlay over the blurred live
-// graph. Form state lives outside the DOM (this closure), so re-opens and
-// later layout modes (ticket 12) never disturb a running crawl — progress
-// re-renders from state in whatever surface is mounted.
+// Launch form: one stateful launch contract rendered as either a full-bleed
+// overlay or a compact inline strip. Form state lives outside the DOM, so mode
+// changes never disturb a running crawl.
 export const CAP_MIN = 1;
 export const CAP_MAX = 5000;
 export const DEFAULT_CAP = 500;
@@ -15,6 +14,7 @@ export function clampCap(raw) {
 export function createLauncher(form, onLaunch) {
   const state = {
     open: false,
+    mode: "overlay", // overlay | inline
     phase: "idle", // idle | running
     seed: "",
     depth: 2,
@@ -79,6 +79,7 @@ export function createLauncher(form, onLaunch) {
 
   function render() {
     overlay.hidden = !state.open;
+    overlay.dataset.mode = state.mode;
     seed.value = state.seed;
     cap.value = String(state.cap);
     renderChips();
@@ -104,7 +105,29 @@ export function createLauncher(form, onLaunch) {
   // A click on the overlay root — the backdrop — closes it; the form panel
   // and its controls float above it, and no ✕ button exists anywhere.
   overlay.addEventListener("click", (event) => {
-    if (event.target === overlay) close();
+    if (state.mode === "overlay" && event.target === overlay) close();
+  });
+
+  document.addEventListener("keydown", (event) => {
+    const target = event.target;
+    if (
+      target instanceof HTMLElement &&
+      (target.matches("input, textarea, select") || target.isContentEditable)
+    ) {
+      return;
+    }
+    if (
+      event.key.toLowerCase() !== "f" ||
+      event.ctrlKey ||
+      event.metaKey ||
+      event.altKey
+    ) {
+      return;
+    }
+    event.preventDefault();
+    state.mode = state.mode === "overlay" ? "inline" : "overlay";
+    state.open = true;
+    render();
   });
 
   function open() {
