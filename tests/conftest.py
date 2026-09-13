@@ -14,7 +14,7 @@ from tests.helpers import collect_events, create_run
 from tests.stub import FakeMediaWiki
 from wikigraph.app import STATIC_DIR, create_app
 
-VIEW_ENTRY = STATIC_DIR / "v2" / "index.html"
+VIEW_ENTRY = STATIC_DIR / "index.html"
 BOOT_TIMEOUT = 10_000
 
 
@@ -41,7 +41,7 @@ def console_errors(bucket: list[str]) -> Callable[[Any], None]:
 
 
 def view_url(client: httpx.AsyncClient, run_id: str) -> str:
-    return f"{client.base_url}/v2/?run={run_id}"
+    return f"{client.base_url}/?run={run_id}"
 
 
 async def completed_run(
@@ -73,7 +73,7 @@ async def view_server(
 ) -> AsyncIterator[httpx.AsyncClient]:
     """The real FastAPI app on a real port, MediaWiki transport stubbed."""
     if not VIEW_ENTRY.is_file():
-        pytest.skip("v2 view not built: run `npm run build` in frontend/")
+        pytest.skip("view not built: run `npm run build` in frontend/")
     server = uvicorn.Server(
         uvicorn.Config(
             create_app(mediawiki_transport=stub.transport),

@@ -68,6 +68,6 @@ async def test_index_serves_the_crawl_form_and_graph_container(client):
 
     assert response.status_code == 200
     html = response.text
-    assert 'id="run-form"' in html
-    assert 'id="seed"' in html
-    assert "cytoscape" in html
+    assert 'id="launch-form"' in html
+    assert 'id="launch-seed"' in html
+    assert 'id="graph"' in html

@@ -7,6 +7,7 @@ import "./style.css";
 
 const container = document.getElementById("graph");
 const statusBox = document.getElementById("status");
+const truncationBox = document.getElementById("truncation");
 const noticeBox = document.getElementById("notice");
 const infoCard = document.getElementById("info-card");
 const cardTitle = document.getElementById("card-title");
@@ -116,6 +117,7 @@ function mountExperience(graphPayload) {
   syncUrl({ lens: activeLens });
   renderLegend(currentExperience);
   renderLensButtons(activeLens);
+  truncationBox.hidden = !graphPayload.truncated;
   showNotice("");
 }
 

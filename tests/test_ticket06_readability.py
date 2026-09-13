@@ -1,9 +1,4 @@
-"""Ticket 06 — graph readability: orientation at scale.
-
-The rendering itself is a manual smoke check (no JS tooling in v1); the seam
-tests pin the contract the renderer relies on: distinct seed node, level data,
-truncation flag, and the static UI markers (legend, banner, tooltip).
-"""
+"""Ticket 06 — graph readability: orientation at scale."""
 
 from __future__ import annotations
 
@@ -32,21 +27,8 @@ async def test_static_ui_carries_the_readability_markers(client):
     assert page.status_code == 200
     html = page.text
     assert 'id="legend"' in html
-    assert 'id="truncated-banner"' in html
-    assert 'id="tooltip"' in html
+    assert 'id="truncation"' in html
+    assert 'id="info-card"' in html
     assert 'id="graph"' in html
-
-    css = await client.get("/style.css")
-    assert css.status_code == 200
-    assert ".swatch.level-0" in css.text
-    assert ".swatch.level-1" in css.text
-    assert ".swatch.level-2" in css.text
-    assert ".swatch.level-3" in css.text
-
-    app_js = await client.get("/app.js")
-    assert app_js.status_code == 200
-    javascript = app_js.text
-    assert "seed" in javascript
-    assert "level-" in javascript
-    assert "truncated" in javascript
-    assert "tooltip" in javascript
+    assert 'id="lens-community"' in html
+    assert 'id="lens-level"' in html

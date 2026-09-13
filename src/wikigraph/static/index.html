@@ -1,77 +1,74 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>wikiGraph</title>
-<link rel="stylesheet" href="/style.css">
-<script src="https://cdn.jsdelivr.net/npm/cytoscape@3.30.4/dist/cytoscape.min.js"></script>
-</head>
-<body>
-<main>
-  <header>
-    <h1>wikiGraph</h1>
-    <p class="tagline">Explore how a Wikipedia article connects to the rest of the encyclopedia.</p>
-  </header>
-
-  <form id="run-form" autocomplete="off">
-    <label for="seed">Seed page</label>
-    <input id="seed" name="seed" type="text" required
-           placeholder="Article title or Wikipedia URL">
-    <div class="row">
-      <div class="field">
-        <label for="language">Edition</label>
-        <select id="language" name="language">
-          <option value="es" selected>Español (es)</option>
-          <option value="en">English (en)</option>
-        </select>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>wikiGraph</title>
+    <script type="module" crossorigin src="/assets/index.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index.css">
+  </head>
+  <body>
+    <main id="stage" class="stage">
+      <div id="graph" class="graph"></div>
+      <nav id="lens" class="lens" aria-label="Color encoding">
+        <button id="lens-community" class="lens-button" type="button">Community</button>
+        <button id="lens-level" class="lens-button" type="button">Level</button>
+      </nav>
+      <aside id="legend" class="legend" aria-live="polite">
+        <p id="legend-title" class="legend-title"></p>
+        <ul id="legend-entries" class="legend-entries"></ul>
+      </aside>
+      <aside id="info-card" class="info-card" hidden>
+        <h2 id="card-title" class="card-title"></h2>
+        <ul class="card-facts">
+          <li id="card-level"></li>
+          <li id="card-degree"></li>
+          <li id="card-community"></li>
+        </ul>
+        <a id="card-link" class="card-link" target="_blank" rel="noreferrer"></a>
+      </aside>
+      <p id="status" class="status"></p>
+      <p id="truncation" class="truncation" role="status" hidden>
+        Node cap reached. This Graph is partial.
+      </p>
+      <p id="notice" class="notice"></p>
+      <button id="launch-chip" class="launch-chip" type="button" aria-haspopup="dialog">+ grafo</button>
+      <div id="launch-overlay" class="overlay" hidden>
+        <form id="launch-form" class="overlay-form" aria-label="Launch a new crawl run">
+          <p class="overlay-title">New crawl</p>
+          <input
+            id="launch-seed"
+            class="overlay-seed"
+            name="seed"
+            type="text"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="Seed — title or Wikipedia URL"
+          />
+          <div id="launch-depth" class="chip-row" role="group" aria-label="Depth">
+            <button class="chip" type="button" data-depth="1">1</button>
+            <button class="chip" type="button" data-depth="2" aria-pressed="true">2</button>
+            <button class="chip" type="button" data-depth="3">3</button>
+          </div>
+          <div id="launch-edition" class="chip-row" role="group" aria-label="Language edition">
+            <button class="chip" type="button" data-language="es" aria-pressed="true">ES</button>
+            <button class="chip" type="button" data-language="en">EN</button>
+          </div>
+          <label class="overlay-micro" for="launch-cap">Node cap</label>
+          <input
+            id="launch-cap"
+            class="overlay-cap"
+            name="nodeCap"
+            type="text"
+            inputmode="numeric"
+            autocomplete="off"
+            value="500"
+          />
+          <button id="launch-submit" class="overlay-launch" type="submit">Launch crawl</button>
+          <p id="launch-progress" class="overlay-progress" aria-live="polite" hidden></p>
+          <p id="launch-error" class="overlay-error" role="alert" hidden></p>
+        </form>
       </div>
-      <div class="field">
-        <label for="depth">Depth</label>
-        <select id="depth" name="depth">
-          <option value="1" selected>1</option>
-          <option value="2">2</option>
-          <option value="3">3</option>
-        </select>
-      </div>
-      <div class="field">
-        <label for="node-cap">Node cap</label>
-        <input id="node-cap" name="nodeCap" type="number" min="1" max="5000" value="500">
-      </div>
-      <button type="submit" id="start-button">Start crawl</button>
-    </div>
-  </form>
-
-  <div id="error" class="hidden" role="alert"></div>
-
-  <section id="progress" class="hidden" aria-label="Crawl progress">
-    <h2>Crawling&hellip;</h2>
-    <div class="counters">
-      <span><strong id="crawled-count">0</strong> crawled</span>
-      <span><strong id="discovered-count">0</strong> discovered</span>
-      <span>frontier depth <strong id="frontier-depth">0</strong></span>
-    </div>
-    <p class="hint">Honest counters &mdash; the total is unknowable, so there is no progress bar.</p>
-    <h3>Recently fetched</h3>
-    <ul id="recent-feed"></ul>
-  </section>
-
-  <div id="truncated-banner" class="hidden" role="status">
-    This run hit the node cap and was truncated. The graph below is partial, not the complete picture.
-  </div>
-
-  <section id="graph-view" class="hidden" aria-label="Crawl result graph">
-    <h2>Graph</h2>
-    <ul id="legend" aria-label="Level legend">
-      <li><span class="swatch level-0"></span> level 0 &middot; seed</li>
-      <li><span class="swatch level-1"></span> level 1</li>
-      <li><span class="swatch level-2"></span> level 2</li>
-      <li><span class="swatch level-3"></span> level 3</li>
-    </ul>
-    <div id="graph"></div>
-    <div id="tooltip" class="hidden" role="tooltip"></div>
-  </section>
-</main>
-<script src="/app.js"></script>
-</body>
+    </main>
+  </body>
 </html>
