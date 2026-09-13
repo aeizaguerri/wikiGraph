@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Crawl Wikipedia article links and render the result as an interactive graph."
 readme = "README.md"
 authors = [
-    { name = "aeizaguerri", email = "[email removed]" }
+    { name = "aeizaguerri" }
 ]
 requires-python = ">=3.11"
 dependencies = [

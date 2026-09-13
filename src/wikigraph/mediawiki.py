@@ -9,9 +9,7 @@ from typing import Any
 import httpx
 
 RESOLVE_BATCH_SIZE = 50
-DEFAULT_USER_AGENT = (
-    "wikiGraph/0.1 (educational article-link crawler; contact: [email removed])"
-)
+DEFAULT_USER_AGENT = "wikiGraph/0.1 (educational article-link crawler)"
 
 
 def configured_user_agent() -> str:
