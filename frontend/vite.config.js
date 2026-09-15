@@ -5,8 +5,9 @@ export default defineConfig({
   build: {
     // FastAPI serves this committed bundle directly as the app's root view.
     outDir: "../src/wikigraph/static",
-    // Keep the throwaway prototype outside the shipping build untouched.
-    emptyOutDir: false,
+    // The static tree is exclusively generated output; clear retired views and
+    // stale bundles on every build.
+    emptyOutDir: true,
     rollupOptions: {
       output: {
         entryFileNames: "assets/[name].js",

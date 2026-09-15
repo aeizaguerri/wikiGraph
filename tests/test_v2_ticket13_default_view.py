@@ -9,9 +9,13 @@ import httpx
 from tests.conftest import BOOT_TIMEOUT, view_url
 from tests.helpers import collect_events, create_run
 from tests.stub import FakeMediaWiki
+from wikigraph.app import STATIC_DIR
 
 
 async def test_root_serves_the_v2_experience_and_retires_v1(client) -> None:
+    assert not (STATIC_DIR / "prototype-v2").exists()
+    assert not (STATIC_DIR / "v2").exists()
+
     page = await client.get("/")
 
     assert page.status_code == 200
