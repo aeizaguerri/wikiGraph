@@ -200,9 +200,11 @@ class SupabaseCrawlRunStore:
         key: str | None = None,
         *,
         client: httpx.Client | None = None,
+        rest_path: str = "/rest/v1",
     ) -> None:
         self._url = (url or os.environ.get("SUPABASE_URL", "")).rstrip("/")
         self._key = key or os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
+        self._rest_path = rest_path.strip("/")
         if not self._url or not self._key:
             raise PersistenceError("Supabase configuration is unavailable.")
         self._client = client or httpx.Client(timeout=20.0)
@@ -210,7 +212,10 @@ class SupabaseCrawlRunStore:
 
     @property
     def _endpoint(self) -> str:
-        return f"{self._url}/rest/v1/{self.table}"
+        rest_url = self._url
+        if self._rest_path and not rest_url.endswith(f"/{self._rest_path}"):
+            rest_url = f"{rest_url}/{self._rest_path}"
+        return f"{rest_url}/{self.table}"
 
     def _headers(self, *, representation: bool = False) -> dict[str, str]:
         headers = {
@@ -307,12 +312,14 @@ class SupabaseCrawlRunStore:
         )
 
     def _patch(self, run_id: str, values: dict[str, Any]) -> None:
-        self._request(
+        records = self._request(
             "PATCH",
-            headers=self._headers(),
+            headers=self._headers(representation=True),
             params={"run_id": f"eq.{run_id}"},
             json=values,
         )
+        if not records or records[0].get("run_id") != run_id:
+            raise PersistenceError("Supabase did not update the crawl run.")
 
     async def shutdown(self) -> None:
         if self._owns_client:
