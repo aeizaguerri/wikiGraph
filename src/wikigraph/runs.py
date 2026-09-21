@@ -101,14 +101,31 @@ class CrawlRun:
         )
 
 
+class CrawlRunHandle(Protocol):
+    """Lifecycle view exposed to API consumers independently of storage."""
+
+    id: str
+    request: CrawlRequest
+    status: RunStatus
+    error: str | None
+    result: CrawlResult | None
+    communities: CommunityAssignment | None
+
+    def subscribe(self) -> asyncio.Queue[RunEvent]: ...
+
+    def unsubscribe(self, queue: asyncio.Queue[RunEvent]) -> None: ...
+
+    async def wait_done(self) -> None: ...
+
+
 class CrawlRunStore(Protocol):
     """Domain operations needed by the API to own Crawl run lifecycles."""
 
     def start_run(
         self, request: CrawlRequest, transport: httpx.AsyncBaseTransport | None
-    ) -> CrawlRun: ...
+    ) -> CrawlRunHandle: ...
 
-    def get(self, run_id: str) -> CrawlRun | None: ...
+    def get(self, run_id: str) -> CrawlRunHandle | None: ...
 
     async def shutdown(self) -> None: ...
 

@@ -7,7 +7,7 @@ import httpx
 from tests.helpers import collect_events, fetch_graph
 from tests.stub import FakeMediaWiki
 from wikigraph.crawler import CrawlRequest
-from wikigraph.runs import CrawlRun, InMemoryCrawlRunStore
+from wikigraph.runs import CrawlRunHandle, InMemoryCrawlRunStore
 
 
 class RecordingRunStore:
@@ -20,10 +20,10 @@ class RecordingRunStore:
 
     def start_run(
         self, request: CrawlRequest, transport: httpx.AsyncBaseTransport | None
-    ) -> CrawlRun:
+    ) -> CrawlRunHandle:
         return self._delegate.start_run(request, transport)
 
-    def get(self, run_id: str) -> CrawlRun | None:
+    def get(self, run_id: str) -> CrawlRunHandle | None:
         self.lookups.append(run_id)
         return self._delegate.get(run_id)
 

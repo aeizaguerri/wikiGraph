@@ -21,7 +21,7 @@ from pydantic.alias_generators import to_camel
 from wikigraph.crawler import CrawlRequest
 from wikigraph.mediawiki import MediaWikiClient
 from wikigraph.runs import (
-    CrawlRun,
+    CrawlRunHandle,
     CrawlRunStore,
     InMemoryCrawlRunStore,
     RunStatus,
@@ -192,14 +192,14 @@ def create_app(
     return app
 
 
-def _require_run(store: CrawlRunStore, run_id: str) -> CrawlRun:
+def _require_run(store: CrawlRunStore, run_id: str) -> CrawlRunHandle:
     run = store.get(run_id)
     if run is None:
         raise _error(404, "unknown_run", "No crawl run with that identifier.")
     return run
 
 
-async def _event_stream(run: CrawlRun) -> AsyncIterator[str]:
+async def _event_stream(run: CrawlRunHandle) -> AsyncIterator[str]:
     queue = run.subscribe()
     try:
         while True:
@@ -210,8 +210,7 @@ async def _event_stream(run: CrawlRun) -> AsyncIterator[str]:
                 continue
             yield f"event: {event.type}\ndata: {json.dumps(event.data)}\n\n"
             if event.type in TERMINAL_EVENT_TYPES:
-                if run.task is not None:
-                    await run.task
+                await run.wait_done()
                 return
     finally:
         run.unsubscribe(queue)
