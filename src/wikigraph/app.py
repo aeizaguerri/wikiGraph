@@ -144,6 +144,14 @@ def create_app(
             raise _error(503, "persistence_unavailable", str(exc)) from exc
         return RunCreated(run_id=run.id)
 
+    @app.post("/api/runs/{run_id}/retry", status_code=202)
+    async def retry_run(run_id: str) -> RunCreated:
+        try:
+            run = store.retry_run(run_id, mediawiki_transport)
+        except PersistenceError as exc:
+            raise _error(409, "run_not_recoverable", str(exc)) from exc
+        return RunCreated(run_id=run.id)
+
     @app.get("/api/runs/{run_id}/events")
     async def run_events(run_id: str) -> StreamingResponse:
         run = _require_run(store, run_id)

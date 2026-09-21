@@ -54,6 +54,23 @@ class CrawlResult:
     discovered: int
 
 
+@dataclass(frozen=True)
+class CrawlCheckpoint:
+    """Durable boundary for resuming a crawl without publishing a Graph."""
+
+    level: int
+    frontier: list[str]
+    batch_start: int
+    next_frontier: list[str]
+    current_batch: list[str]
+    continuation: str | None
+    nodes: list[GraphNode]
+    edges: list[GraphEdge]
+    truncated: bool
+    crawled: int
+    recent: list[str]
+
+
 class Crawler:
     """Walks the graph level by level; each Article is crawled exactly once."""
 
@@ -62,10 +79,14 @@ class Crawler:
         request: CrawlRequest,
         transport: httpx.AsyncBaseTransport | None = None,
         on_progress: Callable[[Progress], Awaitable[None]] | None = None,
+        checkpoint: CrawlCheckpoint | None = None,
+        on_checkpoint: Callable[[CrawlCheckpoint], Awaitable[None]] | None = None,
     ) -> None:
         self._request = request
         self._transport = transport
         self._on_progress = on_progress
+        self._checkpoint = checkpoint
+        self._on_checkpoint = on_checkpoint
 
     async def crawl(self) -> CrawlResult:
         client = MediaWikiClient(self._request.language, transport=self._transport)
@@ -75,21 +96,32 @@ class Crawler:
             await client.aclose()
 
     async def _crawl(self, client: MediaWikiClient) -> CrawlResult:
-        nodes: dict[str, GraphNode] = {}
-        edges: list[GraphEdge] = []
+        checkpoint = self._checkpoint
+        nodes: dict[str, GraphNode] = (
+            {node.title: node for node in checkpoint.nodes} if checkpoint else {}
+        )
+        edges: list[GraphEdge] = list(checkpoint.edges) if checkpoint else []
         seen_edges: set[tuple[str, str]] = set()
-        truncated = False
-        crawled = 0
-        recent: deque[str] = deque(maxlen=RECENT_FEED_SIZE)
+        truncated = checkpoint.truncated if checkpoint else False
+        crawled = checkpoint.crawled if checkpoint else 0
+        recent: deque[str] = deque(
+            checkpoint.recent if checkpoint else [], maxlen=RECENT_FEED_SIZE
+        )
         seed = self._request.seed
-        nodes[seed] = GraphNode(seed, 0, True)
-        frontier = [seed]
+        if not checkpoint:
+            nodes[seed] = GraphNode(seed, 0, True)
+        frontier = checkpoint.frontier if checkpoint else [seed]
+        start_at = checkpoint.batch_start if checkpoint else 0
+        next_frontier = checkpoint.next_frontier if checkpoint else []
+        first_level = checkpoint.level if checkpoint else 1
 
-        for level in range(1, self._request.depth + 1):
+        for level in range(first_level, self._request.depth + 1):
             if truncated or not frontier:
                 break
-            next_frontier: list[str] = []
-            for start in range(0, len(frontier), ARTICLE_LINK_BATCH_SIZE):
+            if level != first_level:
+                start_at = 0
+                next_frontier = []
+            for start in range(start_at, len(frontier), ARTICLE_LINK_BATCH_SIZE):
                 source_batch = frontier[start : start + ARTICLE_LINK_BATCH_SIZE]
                 links_by_source = await client.article_links_batch(source_batch)
                 candidates: list[tuple[str, str]] = []
@@ -113,6 +145,21 @@ class Crawler:
                         next_frontier,
                     )
                 await self._emit_progress(crawled, len(nodes), level, recent)
+                await self._emit_checkpoint(
+                    CrawlCheckpoint(
+                        level=level,
+                        frontier=list(frontier),
+                        batch_start=start + len(source_batch),
+                        next_frontier=list(next_frontier),
+                        current_batch=list(source_batch),
+                        continuation=None,
+                        nodes=list(nodes.values()),
+                        edges=list(edges),
+                        truncated=truncated,
+                        crawled=crawled,
+                        recent=list(recent),
+                    )
+                )
             frontier = next_frontier
 
         return CrawlResult(
@@ -155,6 +202,10 @@ class Crawler:
                 seen_edges.add(edge)
                 edges.append(GraphEdge(source, target))
         return truncated
+
+    async def _emit_checkpoint(self, checkpoint: CrawlCheckpoint) -> None:
+        if self._on_checkpoint is not None:
+            await self._on_checkpoint(checkpoint)
 
     async def _emit_progress(
         self, crawled: int, discovered: int, level: int, recent: deque[str]
