@@ -14,7 +14,7 @@ from typing import Any
 import httpx
 
 from tests.conftest import BOOT_TIMEOUT, boot_view, completed_run
-from tests.helpers import fetch_graph
+from tests.helpers import fetch_graph, wait_static
 from tests.stub import FakeMediaWiki
 
 # The pinned encoding contract, mirrored from frontend/src/experience.js:
@@ -320,6 +320,7 @@ async def test_seed_page_is_distinguishable_in_the_view(
     run_id = await completed_run(stub, view_server, seed="Seed", depth=2)
 
     await boot_view(browser_page, view_server, run_id)
+    await wait_static(browser_page)
     samples = await sampled_nodes(browser_page)
     seed = next(sample for sample in samples if sample["isSeed"])
     others = [sample for sample in samples if not sample["isSeed"]]
