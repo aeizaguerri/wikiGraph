@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-import uuid
+import secrets
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Protocol
@@ -163,7 +163,7 @@ class InMemoryCrawlRunStore:
     def start_run(
         self, request: CrawlRequest, transport: httpx.AsyncBaseTransport | None
     ) -> CrawlRun:
-        run = CrawlRun(uuid.uuid4().hex, request)
+        run = CrawlRun(secrets.token_urlsafe(24), request)
         run.task = asyncio.create_task(run.start(transport))
         self._runs[run.id] = run
         return run
@@ -243,7 +243,7 @@ class SupabaseCrawlRunStore:
     def start_run(
         self, request: CrawlRequest, transport: httpx.AsyncBaseTransport | None
     ) -> CrawlRun:
-        run_id = uuid.uuid4().hex
+        run_id = secrets.token_urlsafe(24)
         row = {
             "run_id": run_id,
             "seed": request.seed,

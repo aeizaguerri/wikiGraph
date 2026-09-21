@@ -4,13 +4,18 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator
+import os
+import time
+from collections import defaultdict, deque
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.exception_handlers import http_exception_handler
 from starlette.responses import Response
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -32,6 +37,8 @@ from wikigraph.seed import SeedError, parse_seed
 
 STATIC_DIR = Path(__file__).parent / "static"
 SSE_HEARTBEAT_SECONDS = 15.0
+LAUNCH_WINDOW_SECONDS = 60.0
+QUOTA_WINDOW_SECONDS = 24 * 60 * 60
 
 
 class CamelModel(BaseModel):
@@ -81,14 +88,119 @@ def _error(status: int, code: str, message: str) -> HTTPException:
     )
 
 
+@dataclass(frozen=True)
+class LaunchLimits:
+    """Limits on accepted Crawl launches, separate from MediaWiki accounting."""
+
+    per_ip_per_minute: int = 5
+    deployment_per_minute: int = 30
+    per_ip_per_day: int = 50
+
+    @classmethod
+    def from_environment(cls) -> "LaunchLimits":
+        return cls(
+            per_ip_per_minute=_positive_setting("WIKIGRAPH_LAUNCHES_PER_IP", 5),
+            deployment_per_minute=_positive_setting("WIKIGRAPH_LAUNCHES_PER_MINUTE", 30),
+            per_ip_per_day=_positive_setting("WIKIGRAPH_LAUNCH_QUOTA", 50),
+        )
+
+
+def _positive_setting(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise RuntimeError(f"{name} must be a positive integer.") from exc
+    if value < 1:
+        raise RuntimeError(f"{name} must be a positive integer.")
+    return value
+
+
+class LaunchLimiter:
+    def __init__(
+        self, limits: LaunchLimits, clock: Callable[[], float] = time.monotonic
+    ) -> None:
+        self._limits = limits
+        self._clock = clock
+        self._per_ip: dict[str, deque[float]] = defaultdict(deque)
+        self._deployment: deque[float] = deque()
+        self._quota: dict[str, deque[float]] = defaultdict(deque)
+
+    def admit(self, ip: str) -> None:
+        now = self._clock()
+        self._trim(self._deployment, now, LAUNCH_WINDOW_SECONDS)
+        per_ip = self._per_ip[ip]
+        quota = self._quota[ip]
+        self._trim(per_ip, now, LAUNCH_WINDOW_SECONDS)
+        self._trim(quota, now, QUOTA_WINDOW_SECONDS)
+        if len(per_ip) >= self._limits.per_ip_per_minute:
+            raise _error(
+                429,
+                "launch_rate_limited",
+                "Too many crawl launches from this address. Try again shortly.",
+            )
+        if len(self._deployment) >= self._limits.deployment_per_minute:
+            raise _error(
+                429,
+                "launch_rate_limited",
+                "The crawl launch service is busy. Try again shortly.",
+            )
+        if len(quota) >= self._limits.per_ip_per_day:
+            raise _error(
+                429,
+                "launch_quota_exceeded",
+                "This address has reached its crawl quota. Try again tomorrow.",
+            )
+        per_ip.append(now)
+        self._deployment.append(now)
+        quota.append(now)
+
+    @staticmethod
+    def _trim(values: deque[float], now: float, window: float) -> None:
+        while values and now - values[0] >= window:
+            values.popleft()
+
+
+def validate_production_configuration() -> None:
+    """Fail startup rather than silently running without canonical persistence."""
+    missing = [
+        name
+        for name in (
+            "SUPABASE_URL",
+            "SUPABASE_SERVICE_ROLE_KEY",
+            "WIKIGRAPH_USER_AGENT",
+        )
+        if not os.environ.get(name)
+    ]
+    if missing:
+        raise RuntimeError(
+            "Production configuration is missing required server-only settings: "
+            + ", ".join(missing)
+        )
+
+
 def create_app(
     mediawiki_transport: httpx.AsyncBaseTransport | None = None,
     run_store: CrawlRunStore | None = None,
+    *,
+    launch_limits: LaunchLimits | None = None,
+    clock: Callable[[], float] = time.monotonic,
+    production: bool | None = None,
 ) -> FastAPI:
     store = run_store if run_store is not None else InMemoryCrawlRunStore()
+    limiter = LaunchLimiter(launch_limits or LaunchLimits.from_environment(), clock)
+    require_production_config = (
+        production
+        if production is not None
+        else os.environ.get("WIKIGRAPH_ENV") == "production"
+    )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        if require_production_config:
+            validate_production_configuration()
         yield
         await store.shutdown()
 
@@ -100,8 +212,23 @@ def create_app(
             return JSONResponse(status_code=exc.status_code, content=exc.detail)
         return await http_exception_handler(request, exc)
 
+    @app.exception_handler(RequestValidationError)
+    async def validation_errors(
+        request: Request, exc: RequestValidationError
+    ) -> JSONResponse:
+        del request, exc
+        return JSONResponse(
+            status_code=422,
+            content={
+                "error": {
+                    "code": "invalid_request",
+                    "message": "The launch request is invalid. Check the seed, edition, depth, and node cap.",
+                }
+            },
+        )
+
     @app.post("/api/runs", status_code=201)
-    async def create_run(body: CreateRunBody) -> RunCreated:
+    async def create_run(request: Request, body: CreateRunBody) -> RunCreated:
         try:
             parsed = parse_seed(body.seed)
         except SeedError as exc:
@@ -132,6 +259,7 @@ def create_app(
                 "not_an_article",
                 f'"{seed_resolution.title}" is not an article in this edition.',
             )
+        limiter.admit(request.client.host if request.client is not None else "unknown")
         crawl_request = CrawlRequest(
             seed=seed_resolution.title,
             depth=body.depth,

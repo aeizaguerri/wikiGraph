@@ -14,7 +14,14 @@ DEFAULT_USER_AGENT = "wikiGraph/0.1 (educational article-link crawler)"
 
 
 def configured_user_agent() -> str:
-    return os.environ.get("WIKIGRAPH_USER_AGENT", DEFAULT_USER_AGENT)
+    configured = os.environ.get("WIKIGRAPH_USER_AGENT")
+    if configured:
+        return configured
+    if os.environ.get("WIKIGRAPH_ENV") == "production":
+        raise RuntimeError(
+            "WIKIGRAPH_USER_AGENT is required in production and must identify wikiGraph."
+        )
+    return DEFAULT_USER_AGENT
 
 
 @dataclass(frozen=True)
