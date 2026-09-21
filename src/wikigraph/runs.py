@@ -6,7 +6,7 @@ import asyncio
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
+from typing import Any, Protocol
 
 import httpx
 
@@ -101,7 +101,19 @@ class CrawlRun:
         )
 
 
-class CrawlRunRegistry:
+class CrawlRunStore(Protocol):
+    """Domain operations needed by the API to own Crawl run lifecycles."""
+
+    def start_run(
+        self, request: CrawlRequest, transport: httpx.AsyncBaseTransport | None
+    ) -> CrawlRun: ...
+
+    def get(self, run_id: str) -> CrawlRun | None: ...
+
+    async def shutdown(self) -> None: ...
+
+
+class InMemoryCrawlRunStore:
     """Runs live in memory keyed by run identifier; nothing survives a restart."""
 
     def __init__(self) -> None:

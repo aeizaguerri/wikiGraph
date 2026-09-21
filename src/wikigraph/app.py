@@ -22,7 +22,8 @@ from wikigraph.crawler import CrawlRequest
 from wikigraph.mediawiki import MediaWikiClient
 from wikigraph.runs import (
     CrawlRun,
-    CrawlRunRegistry,
+    CrawlRunStore,
+    InMemoryCrawlRunStore,
     RunStatus,
     TERMINAL_EVENT_TYPES,
 )
@@ -79,13 +80,16 @@ def _error(status: int, code: str, message: str) -> HTTPException:
     )
 
 
-def create_app(mediawiki_transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
-    registry = CrawlRunRegistry()
+def create_app(
+    mediawiki_transport: httpx.AsyncBaseTransport | None = None,
+    run_store: CrawlRunStore | None = None,
+) -> FastAPI:
+    store = run_store if run_store is not None else InMemoryCrawlRunStore()
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         yield
-        await registry.shutdown()
+        await store.shutdown()
 
     app = FastAPI(title="wikiGraph", lifespan=lifespan)
 
@@ -133,12 +137,12 @@ def create_app(mediawiki_transport: httpx.AsyncBaseTransport | None = None) -> F
             language=language,
             node_cap=body.node_cap,
         )
-        run = registry.start_run(crawl_request, mediawiki_transport)
+        run = store.start_run(crawl_request, mediawiki_transport)
         return RunCreated(run_id=run.id)
 
     @app.get("/api/runs/{run_id}/events")
     async def run_events(run_id: str) -> StreamingResponse:
-        run = _require_run(registry, run_id)
+        run = _require_run(store, run_id)
         return StreamingResponse(
             _event_stream(run),
             media_type="text/event-stream",
@@ -147,7 +151,7 @@ def create_app(mediawiki_transport: httpx.AsyncBaseTransport | None = None) -> F
 
     @app.get("/api/runs/{run_id}/graph")
     async def run_graph(run_id: str) -> GraphOut:
-        run = _require_run(registry, run_id)
+        run = _require_run(store, run_id)
         await run.wait_done()
         if (
             run.status is RunStatus.FAILED
@@ -188,8 +192,8 @@ def create_app(mediawiki_transport: httpx.AsyncBaseTransport | None = None) -> F
     return app
 
 
-def _require_run(registry: CrawlRunRegistry, run_id: str) -> CrawlRun:
-    run = registry.get(run_id)
+def _require_run(store: CrawlRunStore, run_id: str) -> CrawlRun:
+    run = store.get(run_id)
     if run is None:
         raise _error(404, "unknown_run", "No crawl run with that identifier.")
     return run
