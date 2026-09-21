@@ -9,6 +9,7 @@ from typing import Any
 import httpx
 
 RESOLVE_BATCH_SIZE = 50
+ARTICLE_LINK_BATCH_SIZE = 50
 DEFAULT_USER_AGENT = "wikiGraph/0.1 (educational article-link crawler)"
 
 
@@ -48,26 +49,48 @@ class MediaWikiClient:
         )
 
     async def article_links(self, title: str) -> list[ArticleLink]:
+        return (await self.article_links_batch([title]))[title]
+
+    async def article_links_batch(
+        self, titles: list[str]
+    ) -> dict[str, list[ArticleLink]]:
+        """Fetch and fully drain links for up to 50 source Articles."""
+        if not titles:
+            return {}
+        if len(titles) > ARTICLE_LINK_BATCH_SIZE:
+            raise ValueError("article link batches cannot exceed 50 Articles")
         params: dict[str, str] = {
             "action": "query",
             "format": "json",
             "formatversion": "2",
             "prop": "links",
-            "titles": title,
+            "titles": "|".join(titles),
             "pllimit": "max",
         }
-        links: list[ArticleLink] = []
+        links_by_title: dict[str, list[ArticleLink]] = {title: [] for title in titles}
         while True:
             body = await self._get(params)
             pages = body.get("query", {}).get("pages", [])
             if not pages:
-                return links
-            for entry in pages[0].get("links", []):
-                links.append(ArticleLink(title=entry["title"], namespace=entry["ns"]))
-            continuation = body.get("continue", {}).get("plcontinue")
-            if continuation is None:
-                return links
-            params["plcontinue"] = continuation
+                return links_by_title
+            for page in pages:
+                page_title = page.get("title")
+                if page_title not in links_by_title:
+                    continue
+                links_by_title[page_title].extend(
+                    ArticleLink(title=entry["title"], namespace=entry["ns"])
+                    for entry in page.get("links", [])
+                )
+            continuation = body.get("continue")
+            if not continuation:
+                return links_by_title
+            params.update(
+                {
+                    key: str(value)
+                    for key, value in continuation.items()
+                    if key != "continue"
+                }
+            )
 
     async def resolve_titles(self, titles: list[str]) -> dict[str, ResolvedTitle]:
         resolved: dict[str, ResolvedTitle] = {}

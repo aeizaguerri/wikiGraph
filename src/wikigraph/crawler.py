@@ -2,18 +2,16 @@
 
 from __future__ import annotations
 
-import asyncio
 from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 import httpx
 
-from wikigraph.mediawiki import ArticleLink, MediaWikiClient
+from wikigraph.mediawiki import ARTICLE_LINK_BATCH_SIZE, MediaWikiClient
 from wikigraph.titles import clean_title
 
 DEFAULT_NODE_CAP = 500
-MAX_CONCURRENT_REQUESTS = 4
 RECENT_FEED_SIZE = 10
 ARTICLE_NAMESPACE = 0
 
@@ -83,12 +81,6 @@ class Crawler:
         truncated = False
         crawled = 0
         recent: deque[str] = deque(maxlen=RECENT_FEED_SIZE)
-        semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
-
-        async def fetch_links(title: str) -> tuple[str, list[ArticleLink]]:
-            async with semaphore:
-                return title, await client.article_links(title)
-
         seed = self._request.seed
         nodes[seed] = GraphNode(seed, 0, True)
         frontier = [seed]
@@ -97,19 +89,19 @@ class Crawler:
             if truncated or not frontier:
                 break
             next_frontier: list[str] = []
-            fetches = [
-                asyncio.create_task(fetch_links(title)) for title in frontier
-            ]
-            for finished in asyncio.as_completed(fetches):
-                crawled_title, links = await finished
-                crawled += 1
-                recent.append(crawled_title)
-                candidates = [
-                    (crawled_title, cleaned)
-                    for link in links
-                    if link.namespace == ARTICLE_NAMESPACE
-                    and (cleaned := clean_title(link.title))
-                ]
+            for start in range(0, len(frontier), ARTICLE_LINK_BATCH_SIZE):
+                source_batch = frontier[start : start + ARTICLE_LINK_BATCH_SIZE]
+                links_by_source = await client.article_links_batch(source_batch)
+                candidates: list[tuple[str, str]] = []
+                for crawled_title in source_batch:
+                    crawled += 1
+                    recent.append(crawled_title)
+                    candidates.extend(
+                        (crawled_title, cleaned)
+                        for link in links_by_source[crawled_title]
+                        if link.namespace == ARTICLE_NAMESPACE
+                        and (cleaned := clean_title(link.title))
+                    )
                 if candidates:
                     truncated |= await self._discover(
                         client,
@@ -142,7 +134,8 @@ class Crawler:
         next_frontier: list[str],
     ) -> bool:
         """Canonicalize candidates and grow the graph. Returns True if truncated."""
-        resolved = await client.resolve_titles([title for _, title in candidates])
+        unique_titles = list(dict.fromkeys(title for _, title in candidates))
+        resolved = await client.resolve_titles(unique_titles)
         truncated = False
         for source, title in candidates:
             resolution = resolved[title]

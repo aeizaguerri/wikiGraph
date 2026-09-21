@@ -110,39 +110,39 @@ class FakeMediaWiki:
         )
 
     async def _links_response(self, params: dict[str, Any]) -> httpx.Response:
-        title = _normalize(params.get("titles", ""))
-        gate = self.gates.get(title)
-        if gate is not None:
-            await gate.wait()
-        failure_status = self.fail_links_status.get(title)
-        if failure_status is not None:
-            return httpx.Response(
-                failure_status,
-                json={"error": {"code": "cannedfailure", "info": "stubbed MediaWiki failure"}},
-            )
-        page = self.pages.get(title)
-        if page is None or title in self.missing:
-            body: dict[str, Any] = {
-                "batchcomplete": True,
-                "query": {"pages": [{"title": title, "ns": 0, "missing": True}]},
-            }
-            return httpx.Response(200, json=body)
-
         requested_continue = params.get("plcontinue")
-        links = page.links
-        if requested_continue and page.next_batch is not None:
-            links = page.next_batch
-        entries = [{"ns": link.namespace, "title": link.title} for link in links]
-        body = {
-            "batchcomplete": True,
-            "query": {
-                "pages": [
-                    {"title": page.title, "ns": page.namespace, "links": entries},
-                ],
-            },
-        }
-        if not requested_continue and page.next_batch is not None:
-            body["continue"] = {"plcontinue": "stub-batch-2", "continue": "-||"}
+        requested_titles = params.get("titles", "").split("|")
+        continuation_title = params.get("pltitles")
+        titles = [continuation_title] if continuation_title else requested_titles
+        pages: list[dict[str, Any]] = []
+        next_title: str | None = None
+        for raw_title in titles:
+            title = _normalize(raw_title)
+            gate = self.gates.get(title)
+            if gate is not None:
+                await gate.wait()
+            failure_status = self.fail_links_status.get(title)
+            if failure_status is not None:
+                return httpx.Response(
+                    failure_status,
+                    json={"error": {"code": "cannedfailure", "info": "stubbed MediaWiki failure"}},
+                )
+            page = self.pages.get(title)
+            if page is None or title in self.missing:
+                pages.append({"title": title, "ns": 0, "missing": True})
+                continue
+            links = page.next_batch if requested_continue else page.links
+            entries = [{"ns": link.namespace, "title": link.title} for link in links or []]
+            pages.append({"title": page.title, "ns": page.namespace, "links": entries})
+            if not requested_continue and page.next_batch is not None:
+                next_title = title
+        body = {"batchcomplete": True, "query": {"pages": pages}}
+        if next_title is not None:
+            body["continue"] = {
+                "plcontinue": "stub-batch-2",
+                "pltitles": next_title,
+                "continue": "-||",
+            }
         return httpx.Response(200, json=body)
 
     def _resolve_response(self, params: dict[str, Any]) -> httpx.Response:
