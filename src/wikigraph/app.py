@@ -24,6 +24,7 @@ from wikigraph.runs import (
     CrawlRunHandle,
     CrawlRunStore,
     InMemoryCrawlRunStore,
+    PersistenceError,
     RunStatus,
     TERMINAL_EVENT_TYPES,
 )
@@ -137,7 +138,10 @@ def create_app(
             language=language,
             node_cap=body.node_cap,
         )
-        run = store.start_run(crawl_request, mediawiki_transport)
+        try:
+            run = store.start_run(crawl_request, mediawiki_transport)
+        except PersistenceError as exc:
+            raise _error(503, "persistence_unavailable", str(exc)) from exc
         return RunCreated(run_id=run.id)
 
     @app.get("/api/runs/{run_id}/events")
