@@ -1,4 +1,4 @@
-"""In-memory registry of Crawl runs and their event streams."""
+"""Crawl run lifecycle and store abstractions."""
 
 from __future__ import annotations
 
