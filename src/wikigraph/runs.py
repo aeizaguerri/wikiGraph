@@ -82,7 +82,7 @@ class CrawlRun:
         self._persist_completion = persist_completion
         self._persist_failure = persist_failure
         self._governor = governor
-        self._cache = cache or InMemoryResponseCache()
+        self._cache = cache if cache is not None else InMemoryResponseCache()
         self._persist_recovery = persist_recovery
         self._checkpoint = checkpoint
 
@@ -212,7 +212,7 @@ class InMemoryCrawlRunStore:
     ) -> None:
         self._runs: dict[str, CrawlRun] = {}
         self._governor = governor
-        self._cache = cache or InMemoryResponseCache()
+        self._cache = cache if cache is not None else InMemoryResponseCache()
 
     def start_run(
         self, request: CrawlRequest, transport: httpx.AsyncBaseTransport | None
@@ -376,10 +376,16 @@ class SupabaseCrawlRunStore:
         self._client = client or httpx.Client(timeout=20.0)
         self._owns_client = client is None
         self._governor = governor
-        self._cache = cache or (
-            SupabaseResponseCache(self._url, self._key, client=self._client, rest_path=rest_path)
-            if client is None
-            else InMemoryResponseCache()
+        self._cache = (
+            cache
+            if cache is not None
+            else (
+                SupabaseResponseCache(
+                    self._url, self._key, client=self._client, rest_path=rest_path
+                )
+                if client is None
+                else InMemoryResponseCache()
+            )
         )
         self._runs: dict[str, CrawlRun] = {}
 

@@ -76,6 +76,9 @@ class InMemoryResponseCache:
         while len(self._entries) > self.capacity:
             self._entries.popitem(last=False)
 
+    def __len__(self) -> int:
+        return len(self._entries)
+
 
 class SupabaseResponseCache:
     """PostgREST-backed cache; cache failures are handled as misses by callers."""

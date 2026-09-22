@@ -65,7 +65,7 @@ class MediaWikiClient:
         self._language = language
         self._governor = governor
         self._owner = owner
-        self._cache = cache or InMemoryResponseCache()
+        self._cache = cache if cache is not None else InMemoryResponseCache()
         self._http = httpx.AsyncClient(
             base_url=f"https://{language}.wikipedia.org",
             headers={"User-Agent": configured_user_agent()},

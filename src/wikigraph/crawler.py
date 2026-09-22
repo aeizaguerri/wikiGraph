@@ -94,7 +94,7 @@ class Crawler:
         self._owner = owner or request.seed
         self._checkpoint = checkpoint
         self._on_checkpoint = on_checkpoint
-        self._cache = cache or InMemoryResponseCache()
+        self._cache = cache if cache is not None else InMemoryResponseCache()
 
     async def crawl(self) -> CrawlResult:
         client = MediaWikiClient(
