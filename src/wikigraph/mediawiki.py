@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import os
 import random
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from email.utils import parsedate_to_datetime
 from typing import Any
 
 import httpx
@@ -71,12 +73,14 @@ class MediaWikiClient:
         owner: str = "launch-validation",
         clock: Clock | None = None,
         jitter: Callable[[float], float] | None = None,
+        wall_clock: Callable[[], float] = time.time,
     ) -> None:
         self._language = language
         self._governor = governor
         self._owner = owner
         self._clock = clock or SystemClock()
         self._jitter = jitter or (lambda value: value * random.uniform(0.5, 1.5))
+        self._wall_clock = wall_clock
         self._http = httpx.AsyncClient(
             base_url=f"https://{language}.wikipedia.org",
             headers={"User-Agent": configured_user_agent()},
@@ -221,7 +225,12 @@ class MediaWikiClient:
             try:
                 return min(45.0, max(0.0, float(supplied)))
             except ValueError:
-                pass
+                try:
+                    retry_at = parsedate_to_datetime(supplied).timestamp()
+                except (TypeError, ValueError, OverflowError):
+                    pass
+                else:
+                    return min(45.0, max(0.0, retry_at - self._wall_clock()))
         return min(45.0, max(0.0, self._jitter(float(2 ** (attempt - 1)))))
 
     async def aclose(self) -> None:
