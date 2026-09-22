@@ -54,6 +54,8 @@ class GlobalWikimediaGovernor:
         self._worker: asyncio.Task[None] | None = None
         self._starts: deque[float] = deque()
         self._attempts: deque[float] = deque()
+        self._in_flight = 0
+        self.max_in_flight = 0
         self.dispatch_log: list[tuple[str, float]] = []
 
     async def request(self, owner: str, operation: Callable[[], Awaitable[T]]) -> T:
@@ -82,6 +84,8 @@ class GlobalWikimediaGovernor:
             self._starts.append(started)
             self._attempts.append(started)
             self.dispatch_log.append((request.owner, started))
+            self._in_flight += 1
+            self.max_in_flight = max(self.max_in_flight, self._in_flight)
             try:
                 result = await request.operation()
             except asyncio.CancelledError:
@@ -94,6 +98,8 @@ class GlobalWikimediaGovernor:
             else:
                 if not request.result.done():
                     request.result.set_result(result)
+            finally:
+                self._in_flight -= 1
 
     async def _wait_for_capacity(self) -> None:
         while True:
