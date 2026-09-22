@@ -1,0 +1,27 @@
+services:
+  - type: web
+    name: wikigraph-api
+    runtime: python
+    plan: starter
+    buildCommand: pip install uv && uv sync --frozen --no-dev
+    startCommand: uv run uvicorn wikigraph.app:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /readyz
+    envVars:
+      - key: WIKIGRAPH_ENV
+        value: production
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: WIKIGRAPH_USER_AGENT
+        sync: false
+      - key: WIKIGRAPH_IP_HASH_SECRET
+        sync: false
+      - key: WIKIGRAPH_LAUNCHES_PER_IP
+        value: "5"
+      - key: WIKIGRAPH_LAUNCHES_PER_MINUTE
+        value: "30"
+      - key: WIKIGRAPH_LAUNCH_QUOTA
+        value: "50"
+      - key: WIKIGRAPH_LAUNCH_IP_KEYS
+        value: "10000"

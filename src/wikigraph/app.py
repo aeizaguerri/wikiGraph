@@ -36,6 +36,7 @@ from wikigraph.runs import (
     LaunchAdmissionStore,
     PersistenceError,
     RunStatus,
+    SupabaseCrawlRunStore,
     TERMINAL_EVENT_TYPES,
 )
 from wikigraph.seed import SeedError, parse_seed
@@ -235,7 +236,6 @@ def create_app(
     launch_admission_store: LaunchAdmissionStore | None = None,
     governor: GlobalWikimediaGovernor = DEFAULT_GOVERNOR,
 ) -> FastAPI:
-    store = run_store if run_store is not None else InMemoryCrawlRunStore(governor)
     limits = launch_limits or LaunchLimits.from_environment()
     require_production_config = (
         production
@@ -244,6 +244,14 @@ def create_app(
     )
     if require_production_config:
         validate_production_configuration()
+    if run_store is None:
+        store: CrawlRunStore = (
+            SupabaseCrawlRunStore(governor=governor)
+            if require_production_config
+            else InMemoryCrawlRunStore(governor)
+        )
+    else:
+        store = run_store
     admission_store = launch_admission_store
     if admission_store is None and require_production_config:
         from wikigraph.runs import SupabaseLaunchAdmissionStore
@@ -255,6 +263,10 @@ def create_app(
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         if require_production_config:
             validate_production_configuration()
+            try:
+                store.healthcheck()
+            except PersistenceError as exc:
+                raise RuntimeError("Canonical Supabase persistence is unavailable.") from exc
         yield
         if admission_store is not None:
             admission_store.close()
@@ -266,6 +278,21 @@ def create_app(
             await governor.shutdown()
 
     app = FastAPI(title="wikiGraph", lifespan=lifespan)
+
+    @app.get("/healthz")
+    async def healthcheck() -> dict[str, str]:
+        return {"status": "ok"}
+
+    @app.get("/readyz")
+    async def readiness() -> dict[str, str]:
+        try:
+            store.healthcheck()
+        except PersistenceError as exc:
+            raise _error(503, "persistence_unavailable", str(exc)) from exc
+        return {
+            "status": "ready",
+            "persistence": "supabase" if require_production_config else "local",
+        }
 
     @app.exception_handler(HTTPException)
     async def structured_errors(request: Request, exc: HTTPException) -> Response:

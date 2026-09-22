@@ -234,6 +234,8 @@ class CrawlRunStore(Protocol):
 
     def get(self, run_id: str) -> CrawlRunHandle | None: ...
 
+    def healthcheck(self) -> None: ...
+
     async def shutdown(self) -> None: ...
 
 
@@ -265,6 +267,11 @@ class InMemoryCrawlRunStore:
 
     def get(self, run_id: str) -> CrawlRun | None:
         return self._runs.get(run_id)
+
+    def healthcheck(self) -> None:
+        """Local tests have no external persistence dependency to verify."""
+
+        return None
 
     def retry_run(
         self, run_id: str, transport: httpx.AsyncBaseTransport | None
@@ -443,6 +450,14 @@ class SupabaseCrawlRunStore:
         if representation:
             headers["Prefer"] = "return=representation"
         return headers
+
+    def healthcheck(self) -> None:
+        """Verify that the configured service-role client can reach PostgREST."""
+        self._request(
+            "GET",
+            headers=self._headers(),
+            params={"select": "run_id", "limit": "1"},
+        )
 
     def _request(self, method: str, **kwargs: Any) -> list[dict[str, Any]]:
         try:
