@@ -8,10 +8,12 @@ import json
 import httpx
 import pytest
 
+from benchmarks.ticket19_representative import DeterministicClock
 from tests.helpers import collect_events, fetch_graph
 from tests.stub import FakeMediaWiki
 from wikigraph.app import _event_stream, create_app
 from wikigraph.crawler import CrawlRequest
+from wikigraph.governor import GlobalWikimediaGovernor
 from wikigraph.runs import PersistenceError, SupabaseCrawlRunStore
 
 
@@ -51,6 +53,7 @@ async def test_completed_graph_is_reopened_from_a_fresh_store(
             "https://supabase.test",
             "server-only-test-key",
             client=httpx.Client(transport=database.transport()),
+            governor=GlobalWikimediaGovernor(DeterministicClock()),
         )
 
     first = create_app(
@@ -91,6 +94,7 @@ async def test_identical_launches_still_create_distinct_persisted_runs(
         "https://supabase.test",
         "server-only-test-key",
         client=httpx.Client(transport=database.transport()),
+        governor=GlobalWikimediaGovernor(DeterministicClock()),
     )
     app = create_app(mediawiki_transport=stub.transport, run_store=store)
     async with app.router.lifespan_context(app):
@@ -121,6 +125,7 @@ async def test_active_progress_is_persisted_before_terminal_sse(
         "https://supabase.test",
         "server-only-test-key",
         client=httpx.Client(transport=database.transport()),
+        governor=GlobalWikimediaGovernor(DeterministicClock()),
     )
     app = create_app(mediawiki_transport=stub.transport, run_store=store)
     async with app.router.lifespan_context(app):
@@ -168,6 +173,7 @@ async def test_missing_update_row_is_reported_as_persistence_failure(
         "https://supabase.test",
         "server-only-test-key",
         client=httpx.Client(transport=httpx.MockTransport(lambda _: httpx.Response(200, json=[]))),
+        governor=GlobalWikimediaGovernor(DeterministicClock()),
     )
     with pytest.raises(PersistenceError, match="did not update"):
         store._patch("missing-run", {"status": "failed"})
@@ -187,6 +193,7 @@ async def test_update_failure_turns_the_owning_run_into_a_failure(
         "https://supabase.test",
         "server-only-test-key",
         client=httpx.Client(transport=httpx.MockTransport(update_drops)),
+        governor=GlobalWikimediaGovernor(DeterministicClock()),
     )
     run = store.start_run(CrawlRequest("Hub", 1, "es"), stub.transport)
     await run.wait_done()
@@ -208,6 +215,7 @@ async def test_persistence_failure_is_not_replaced_by_an_in_memory_run(
         "https://supabase.test",
         "server-only-test-key",
         client=httpx.Client(transport=httpx.MockTransport(unavailable)),
+        governor=GlobalWikimediaGovernor(DeterministicClock()),
     )
     app = create_app(mediawiki_transport=stub.transport, run_store=store)
     async with app.router.lifespan_context(app):
