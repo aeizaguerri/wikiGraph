@@ -15,9 +15,11 @@ import uuid
 import httpx
 import pytest
 
+from benchmarks.ticket19_representative import DeterministicClock
 from tests.helpers import fetch_graph
 from tests.stub import FakeMediaWiki
 from wikigraph.app import create_app
+from wikigraph.governor import GlobalWikimediaGovernor
 from wikigraph.runs import SupabaseCrawlRunStore
 
 
@@ -41,7 +43,12 @@ def _headers() -> dict[str, str]:
 
 def _store() -> SupabaseCrawlRunStore:
     assert POSTGREST_URL is not None
-    return SupabaseCrawlRunStore(POSTGREST_URL, POSTGREST_KEY, rest_path="")
+    return SupabaseCrawlRunStore(
+        POSTGREST_URL,
+        POSTGREST_KEY,
+        rest_path="",
+        governor=GlobalWikimediaGovernor(DeterministicClock()),
+    )
 
 
 async def test_real_postgrest_constraints_and_fresh_process_reopen(

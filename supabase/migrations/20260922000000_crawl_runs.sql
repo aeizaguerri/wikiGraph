@@ -7,8 +7,9 @@ create table if not exists public.crawl_runs (
   language text not null check (language in ('es', 'en')),
   depth smallint not null check (depth between 1 and 3),
   node_cap integer not null check (node_cap between 1 and 5000),
-  status text not null check (status in ('running', 'completed', 'failed')),
+  status text not null check (status in ('running', 'recoverable', 'completed', 'failed')),
   progress jsonb not null default '{"crawled":0,"discovered":1,"depth":0,"recent":[]}'::jsonb,
+  checkpoint jsonb not null,
   graph jsonb,
   error text,
   created_at timestamptz not null default now(),
@@ -192,9 +193,13 @@ end;
 $$;
 
 revoke all on function public.admit_crawl_launch(text, integer, integer, integer, integer)
-from public, anon;
+from public;
 do $$
 begin
+  if exists (select 1 from pg_roles where rolname = 'anon') then
+    revoke all on function public.admit_crawl_launch(text, integer, integer, integer, integer)
+      from anon;
+  end if;
   if exists (select 1 from pg_roles where rolname = 'service_role') then
     grant execute on function public.admit_crawl_launch(text, integer, integer, integer, integer)
       to service_role;

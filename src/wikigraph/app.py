@@ -26,6 +26,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
 
 from wikigraph.crawler import CrawlRequest
+from wikigraph.governor import DEFAULT_GOVERNOR, GlobalWikimediaGovernor
 from wikigraph.mediawiki import MediaWikiClient
 from wikigraph.runs import (
     CrawlRunHandle,
@@ -213,8 +214,9 @@ def create_app(
     clock: Callable[[], float] = time.monotonic,
     production: bool | None = None,
     launch_admission_store: LaunchAdmissionStore | None = None,
+    governor: GlobalWikimediaGovernor = DEFAULT_GOVERNOR,
 ) -> FastAPI:
-    store = run_store if run_store is not None else InMemoryCrawlRunStore()
+    store = run_store if run_store is not None else InMemoryCrawlRunStore(governor)
     limits = launch_limits or LaunchLimits.from_environment()
     require_production_config = (
         production
@@ -238,6 +240,7 @@ def create_app(
         if admission_store is not None:
             admission_store.close()
         await store.shutdown()
+        await governor.shutdown()
 
     app = FastAPI(title="wikiGraph", lifespan=lifespan)
 
@@ -276,7 +279,12 @@ def create_app(
                 f'but the selected edition is "{body.language}". Match them and try again.',
             )
         language = parsed.language or body.language
-        client = MediaWikiClient(language, transport=mediawiki_transport)
+        client = MediaWikiClient(
+            language,
+            transport=mediawiki_transport,
+            governor=governor,
+            owner="launch-validation",
+        )
         try:
             resolved = await client.resolve_titles([parsed.title])
         finally:
@@ -321,6 +329,14 @@ def create_app(
             run = store.start_run(crawl_request, mediawiki_transport)
         except PersistenceError as exc:
             raise _error(503, "persistence_unavailable", str(exc)) from exc
+        return RunCreated(run_id=run.id)
+
+    @app.post("/api/runs/{run_id}/retry", status_code=202)
+    async def retry_run(run_id: str) -> RunCreated:
+        try:
+            run = store.retry_run(run_id, mediawiki_transport)
+        except PersistenceError as exc:
+            raise _error(409, "run_not_recoverable", str(exc)) from exc
         return RunCreated(run_id=run.id)
 
     @app.get("/api/runs/{run_id}/events")

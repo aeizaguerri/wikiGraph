@@ -8,6 +8,8 @@ from typing import Any
 
 import httpx
 
+from wikigraph.governor import DEFAULT_GOVERNOR, GlobalWikimediaGovernor
+
 RESOLVE_BATCH_SIZE = 50
 ARTICLE_LINK_BATCH_SIZE = 50
 DEFAULT_USER_AGENT = "wikiGraph/0.1 (educational article-link crawler)"
@@ -45,9 +47,16 @@ class MediaWikiClient:
     """Talks to `{language}.wikipedia.org/w/api.php` over HTTP."""
 
     def __init__(
-        self, language: str, transport: httpx.AsyncBaseTransport | None = None
+        self,
+        language: str,
+        transport: httpx.AsyncBaseTransport | None = None,
+        *,
+        governor: GlobalWikimediaGovernor = DEFAULT_GOVERNOR,
+        owner: str = "launch-validation",
     ) -> None:
         self._language = language
+        self._governor = governor
+        self._owner = owner
         self._http = httpx.AsyncClient(
             base_url=f"https://{language}.wikipedia.org",
             headers={"User-Agent": configured_user_agent()},
@@ -140,7 +149,9 @@ class MediaWikiClient:
         return ResolvedTitle(page["title"], page.get("ns", 0), "missing" in page)
 
     async def _get(self, params: dict[str, str]) -> dict[str, Any]:
-        response = await self._http.get("/w/api.php", params=params)
+        response = await self._governor.request(
+            self._owner, lambda: self._http.get("/w/api.php", params=params)
+        )
         if response.status_code != 200:
             raise MediaWikiError(
                 f"MediaWiki API returned HTTP {response.status_code}"

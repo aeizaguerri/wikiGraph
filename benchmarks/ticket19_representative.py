@@ -20,6 +20,7 @@ from typing import Any
 import httpx
 
 from wikigraph.crawler import CrawlRequest, Crawler
+from wikigraph.governor import GlobalWikimediaGovernor
 
 TOTAL_NODES = 2_500
 LINK_PAGE_SIZE = 4
@@ -31,6 +32,20 @@ class Dataset:
     levels: list[list[str]]
     links: dict[str, list[str]]
     redirects: dict[str, str]
+
+
+class DeterministicClock:
+    """Advances limiter time instead of sleeping during the simulated crawl."""
+
+    def __init__(self) -> None:
+        self.current = 0.0
+
+    def now(self) -> float:
+        return self.current
+
+    async def sleep(self, delay: float) -> None:
+        self.current += delay
+        await asyncio.sleep(0)
 
 
 def build_dataset() -> Dataset:
@@ -159,9 +174,35 @@ def expected_edges(dataset: Dataset) -> set[tuple[str, str]]:
 async def run_benchmark() -> dict[str, Any]:
     dataset = build_dataset()
     transport = RepresentativeTransport(dataset)
+    clock = DeterministicClock()
+    governor = GlobalWikimediaGovernor(clock)
+
+    fairness_order: list[str] = []
+
+    async def fairness_probe(owner: str) -> None:
+        fairness_order.append(owner)
+
+    await asyncio.gather(
+        *(
+            governor.request(owner, lambda owner=owner: fairness_probe(owner))
+            for owner in ("es-probe", "en-probe")
+            for _ in range(3)
+        )
+    )
+    assert fairness_order == [
+        "es-probe",
+        "en-probe",
+        "es-probe",
+        "en-probe",
+        "es-probe",
+        "en-probe",
+    ]
+    governor.dispatch_log.clear()
     result = await Crawler(
         CrawlRequest("Article 0000", len(dataset.levels) - 1, "en", TOTAL_NODES),
         transport=transport,
+        governor=governor,
+        owner="representative-run",
     ).crawl()
     node_titles = {node.title for node in result.nodes}
     edge_pairs = {(edge.source, edge.target) for edge in result.edges}
@@ -179,6 +220,30 @@ async def run_benchmark() -> dict[str, Any]:
     resolve_batch_counts = [
         len(item["params"]["titles"].split("|")) for item in resolve_requests
     ]
+    timestamps = [timestamp for _, timestamp in governor.dispatch_log]
+
+    def max_window_count(window: float) -> int:
+        return max(
+            (
+                sum(start <= current < start + window for current in timestamps)
+                for start in timestamps
+            ),
+            default=0,
+        )
+
+    limiter_evidence = {
+        "max_in_flight": governor.max_in_flight,
+        "max_starts_in_second": max_window_count(1.0),
+        "max_attempts_in_minute": max_window_count(60.0),
+        "attempts": len(timestamps),
+        "owners": sorted({owner for owner, _ in governor.dispatch_log}),
+        "simulated_time": clock.now(),
+        "fairness_order": fairness_order,
+    }
+    assert limiter_evidence["max_in_flight"] == 1
+    assert limiter_evidence["max_starts_in_second"] <= 2
+    assert limiter_evidence["max_attempts_in_minute"] <= 120
+    assert limiter_evidence["owners"] == ["representative-run"]
     invariants = {
         "node_count": len(node_titles) == TOTAL_NODES,
         "unique_nodes": len(result.nodes) == len(node_titles),
@@ -207,6 +272,7 @@ async def run_benchmark() -> dict[str, Any]:
         "redirect_requests": len(resolve_requests),
         "redirect_titles": sum(resolve_batch_counts),
         "max_titles_in_redirect_request": max(resolve_batch_counts),
+        "limiter": limiter_evidence,
         "invariants": invariants,
     }
 
