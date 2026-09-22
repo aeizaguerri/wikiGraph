@@ -22,6 +22,11 @@ from wikigraph.crawler import (
     Progress,
 )
 from wikigraph.governor import DEFAULT_GOVERNOR, GlobalWikimediaGovernor
+from wikigraph.response_cache import (
+    InMemoryResponseCache,
+    ResponseCache,
+    SupabaseResponseCache,
+)
 
 
 class RunStatus(str, Enum):
@@ -57,6 +62,7 @@ class CrawlRun:
         persist_completion: Callable[["CrawlRun"], None] | None = None,
         persist_failure: Callable[["CrawlRun"], None] | None = None,
         governor: GlobalWikimediaGovernor = DEFAULT_GOVERNOR,
+        cache: ResponseCache | None = None,
         persist_recovery: Callable[["CrawlRun"], None] | None = None,
         checkpoint: CrawlCheckpoint | None = None,
     ) -> None:
@@ -76,6 +82,7 @@ class CrawlRun:
         self._persist_completion = persist_completion
         self._persist_failure = persist_failure
         self._governor = governor
+        self._cache = cache or InMemoryResponseCache()
         self._persist_recovery = persist_recovery
         self._checkpoint = checkpoint
 
@@ -198,9 +205,14 @@ class CrawlRunStore(Protocol):
 class InMemoryCrawlRunStore:
     """Runs live in memory keyed by run identifier; nothing survives a restart."""
 
-    def __init__(self, governor: GlobalWikimediaGovernor = DEFAULT_GOVERNOR) -> None:
+    def __init__(
+        self,
+        governor: GlobalWikimediaGovernor = DEFAULT_GOVERNOR,
+        cache: ResponseCache | None = None,
+    ) -> None:
         self._runs: dict[str, CrawlRun] = {}
         self._governor = governor
+        self._cache = cache or InMemoryResponseCache()
 
     def start_run(
         self, request: CrawlRequest, transport: httpx.AsyncBaseTransport | None
@@ -210,6 +222,7 @@ class InMemoryCrawlRunStore:
             request,
             governor=self._governor,
             checkpoint=_initial_checkpoint(request),
+            cache=self._cache,
         )
         run.task = asyncio.create_task(run.start(transport))
         self._runs[run.id] = run
@@ -231,6 +244,7 @@ class InMemoryCrawlRunStore:
             current.request,
             governor=self._governor,
             checkpoint=current._checkpoint,
+            cache=self._cache,
         )
         run.task = asyncio.create_task(run.start(transport))
         self._runs[run_id] = run
@@ -352,6 +366,7 @@ class SupabaseCrawlRunStore:
         client: httpx.Client | None = None,
         rest_path: str = "/rest/v1",
         governor: GlobalWikimediaGovernor = DEFAULT_GOVERNOR,
+        cache: ResponseCache | None = None,
     ) -> None:
         self._url = (url or os.environ.get("SUPABASE_URL", "")).rstrip("/")
         self._key = key or os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
@@ -361,6 +376,11 @@ class SupabaseCrawlRunStore:
         self._client = client or httpx.Client(timeout=20.0)
         self._owns_client = client is None
         self._governor = governor
+        self._cache = cache or (
+            SupabaseResponseCache(self._url, self._key, client=self._client, rest_path=rest_path)
+            if client is None
+            else InMemoryResponseCache()
+        )
         self._runs: dict[str, CrawlRun] = {}
 
     @property
@@ -420,6 +440,7 @@ class SupabaseCrawlRunStore:
             persist_completion=lambda completed: self._save_completion(completed),
             persist_failure=lambda failed: self._save_failure(failed),
             governor=self._governor,
+            cache=self._cache,
             persist_recovery=lambda recovered: self._save_recovery(recovered),
         )
         run.task = asyncio.create_task(run.start(transport))
@@ -450,6 +471,7 @@ class SupabaseCrawlRunStore:
             request,
             governor=self._governor,
             checkpoint=checkpoint,
+            cache=self._cache,
         )
         _hydrate_run(run, row)
         self._runs[run_id] = run
@@ -482,6 +504,7 @@ class SupabaseCrawlRunStore:
             run_id,
             request,
             governor=self._governor,
+            cache=self._cache,
             checkpoint=checkpoint,
             persist_progress=lambda progress: self._save_progress(run_id, progress),
             persist_checkpoint=lambda value: self._save_checkpoint(run_id, value),

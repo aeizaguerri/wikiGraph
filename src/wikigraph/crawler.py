@@ -11,6 +11,7 @@ import httpx
 from wikigraph.mediawiki import ARTICLE_LINK_BATCH_SIZE, MediaWikiClient
 from wikigraph.governor import DEFAULT_GOVERNOR, GlobalWikimediaGovernor
 from wikigraph.titles import clean_title
+from wikigraph.response_cache import InMemoryResponseCache, ResponseCache
 
 DEFAULT_NODE_CAP = 500
 RECENT_FEED_SIZE = 10
@@ -84,6 +85,7 @@ class Crawler:
         owner: str | None = None,
         checkpoint: CrawlCheckpoint | None = None,
         on_checkpoint: Callable[[CrawlCheckpoint], Awaitable[None]] | None = None,
+        cache: ResponseCache | None = None,
     ) -> None:
         self._request = request
         self._transport = transport
@@ -92,6 +94,7 @@ class Crawler:
         self._owner = owner or request.seed
         self._checkpoint = checkpoint
         self._on_checkpoint = on_checkpoint
+        self._cache = cache or InMemoryResponseCache()
 
     async def crawl(self) -> CrawlResult:
         client = MediaWikiClient(
@@ -99,6 +102,7 @@ class Crawler:
             transport=self._transport,
             governor=self._governor,
             owner=self._owner,
+            cache=self._cache,
         )
         try:
             return await self._crawl(client)

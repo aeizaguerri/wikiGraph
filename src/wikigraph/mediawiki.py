@@ -9,6 +9,13 @@ from typing import Any
 import httpx
 
 from wikigraph.governor import DEFAULT_GOVERNOR, GlobalWikimediaGovernor
+from wikigraph.response_cache import (
+    InMemoryResponseCache,
+    ResponseCache,
+    ResponseCacheKey,
+    continuation_identity,
+    normalized_titles,
+)
 
 RESOLVE_BATCH_SIZE = 50
 ARTICLE_LINK_BATCH_SIZE = 50
@@ -53,10 +60,12 @@ class MediaWikiClient:
         *,
         governor: GlobalWikimediaGovernor = DEFAULT_GOVERNOR,
         owner: str = "launch-validation",
+        cache: ResponseCache | None = None,
     ) -> None:
         self._language = language
         self._governor = governor
         self._owner = owner
+        self._cache = cache or InMemoryResponseCache()
         self._http = httpx.AsyncClient(
             base_url=f"https://{language}.wikipedia.org",
             headers={"User-Agent": configured_user_agent()},
@@ -84,8 +93,16 @@ class MediaWikiClient:
             "pllimit": "max",
         }
         links_by_title: dict[str, list[ArticleLink]] = {title: [] for title in titles}
+        request_identity = normalized_titles(titles)
+        params_identity = dict(params)
         while True:
-            body = await self._get(params)
+            body = await self._cached_get(
+                params,
+                ResponseCacheKey(
+                    "article-links", self._language, request_identity,
+                    continuation_identity(params_identity),
+                ),
+            )
             pages = body.get("query", {}).get("pages", [])
             if not pages:
                 return links_by_title
@@ -107,6 +124,7 @@ class MediaWikiClient:
                     if key != "continue"
                 }
             )
+            params_identity = dict(params)
 
     async def resolve_titles(self, titles: list[str]) -> dict[str, ResolvedTitle]:
         resolved: dict[str, ResolvedTitle] = {}
@@ -119,7 +137,13 @@ class MediaWikiClient:
                 "titles": "|".join(batch),
                 "redirects": "1",
             }
-            body = await self._get(params)
+            body = await self._cached_get(
+                params,
+                ResponseCacheKey(
+                    "redirects", self._language, normalized_titles(batch),
+                    continuation_identity(params),
+                ),
+            )
             query = body.get("query", {})
             mapping: dict[str, str] = {
                 entry["from"]: entry["to"] for entry in query.get("normalized", [])
@@ -162,6 +186,16 @@ class MediaWikiClient:
             raise MediaWikiError(
                 f"MediaWiki API error: {error.get('code', 'unknown')}"
             )
+        return body
+
+    async def _cached_get(
+        self, params: dict[str, str], key: ResponseCacheKey
+    ) -> dict[str, Any]:
+        cached = self._cache.get(key)
+        if cached is not None:
+            return cached
+        body = await self._get(params)
+        self._cache.put(key, body)
         return body
 
     async def aclose(self) -> None:
