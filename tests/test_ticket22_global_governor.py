@@ -17,6 +17,39 @@ class FakeClock:
         await asyncio.sleep(0)
 
 
+class SharedCanonicalAdmission:
+    """Small in-process model of the Supabase lease/RPC boundary."""
+
+    def __init__(self, clock: FakeClock) -> None:
+        self.clock = clock
+        self.pending: list[str] = []
+        self.last_owner: str | None = None
+        self.in_flight = False
+        self.max_in_flight = 0
+        self.starts: list[float] = []
+
+    async def acquire(self, owner: str) -> None:
+        self.pending.append(owner)
+        while True:
+            distinct_waiter = any(candidate != self.last_owner for candidate in self.pending)
+            is_turn = self.pending[0] == owner and (
+                owner != self.last_owner or not distinct_waiter
+            )
+            if not self.in_flight and is_turn:
+                break
+            await asyncio.sleep(0)
+        self.pending.remove(owner)
+        if self.starts:
+            self.clock.current = max(self.clock.current, self.starts[-1] + 0.5)
+        self.starts.append(self.clock.now())
+        self.in_flight = True
+        self.max_in_flight = max(self.max_in_flight, 1)
+        self.last_owner = owner
+
+    async def release(self) -> None:
+        self.in_flight = False
+
+
 async def test_governor_is_one_in_flight_and_round_robin_across_runs() -> None:
     clock = FakeClock()
     governor = GlobalWikimediaGovernor(clock)
@@ -57,3 +90,27 @@ async def test_governor_counts_all_attempts_in_global_second_and_minute_windows(
     assert attempts[119] < 60
     assert attempts[120] >= 60
     assert len(governor.dispatch_log) == 121
+
+
+async def test_distinct_runtime_governors_share_canonical_concurrency_and_windows() -> None:
+    clock = FakeClock()
+    admission = SharedCanonicalAdmission(clock)
+    first = GlobalWikimediaGovernor(clock, admission=admission)
+    second = GlobalWikimediaGovernor(clock, admission=admission)
+    started: list[str] = []
+
+    async def operation(owner: str) -> None:
+        started.append(owner)
+        await asyncio.sleep(0)
+
+    await asyncio.gather(
+        *(first.request("es-run", lambda: operation("es-run")) for _ in range(2)),
+        *(second.request("en-run", lambda: operation("en-run")) for _ in range(2)),
+    )
+
+    assert admission.max_in_flight == 1
+    assert started == ["es-run", "en-run", "es-run", "en-run"]
+    assert max(
+        sum(start <= current < start + 1 for current in admission.starts)
+        for start in admission.starts
+    ) <= 2

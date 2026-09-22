@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Protocol, TypeVar
+
+import httpx
+import uuid
 
 T = TypeVar("T")
 
@@ -16,6 +20,12 @@ class Clock(Protocol):
     def now(self) -> float: ...
 
     async def sleep(self, delay: float) -> None: ...
+
+
+class WikimediaAdmission(Protocol):
+    async def acquire(self, owner: str) -> None: ...
+
+    async def release(self) -> None: ...
 
 
 class SystemClock:
@@ -46,8 +56,13 @@ class GlobalWikimediaGovernor:
     MAX_STARTS_PER_SECOND = 2
     MAX_ATTEMPTS_PER_MINUTE = 120
 
-    def __init__(self, clock: Clock | None = None) -> None:
+    def __init__(
+        self,
+        clock: Clock | None = None,
+        admission: WikimediaAdmission | None = None,
+    ) -> None:
         self._clock = clock or SystemClock()
+        self._admission = admission
         self._queues: dict[str, deque[_Request]] = {}
         self._owners: deque[str] = deque()
         self._wake = asyncio.Event()
@@ -87,6 +102,8 @@ class GlobalWikimediaGovernor:
             self._in_flight += 1
             self.max_in_flight = max(self.max_in_flight, self._in_flight)
             try:
+                if self._admission is not None:
+                    await self._admission.acquire(request.owner)
                 result = await request.operation()
             except asyncio.CancelledError:
                 if not request.result.done():
@@ -99,6 +116,8 @@ class GlobalWikimediaGovernor:
                 if not request.result.done():
                     request.result.set_result(result)
             finally:
+                if self._admission is not None:
+                    await self._admission.release()
                 self._in_flight -= 1
 
     async def _wait_for_capacity(self) -> None:
@@ -138,4 +157,87 @@ class GlobalWikimediaGovernor:
         self._owners.clear()
 
 
-DEFAULT_GOVERNOR = GlobalWikimediaGovernor()
+class SupabaseWikimediaAdmission:
+    """Cross-process governor lease backed by atomic Supabase RPCs."""
+
+    acquire_function = "acquire_wikimedia_attempt"
+    release_function = "release_wikimedia_attempt"
+
+    def __init__(
+        self,
+        url: str | None = None,
+        key: str | None = None,
+        *,
+        client: httpx.AsyncClient | None = None,
+        rest_path: str = "/rest/v1",
+        clock: Clock | None = None,
+    ) -> None:
+        self._url = (url or os.environ.get("SUPABASE_URL", "")).rstrip("/")
+        self._key = key or os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
+        if not self._url or not self._key:
+            raise RuntimeError("Supabase configuration is unavailable.")
+        self._rest = rest_path.strip("/")
+        self._client = client or httpx.AsyncClient(timeout=20.0)
+        self._owns_client = client is None
+        self._clock = clock or SystemClock()
+        self._request_id: str | None = None
+
+    def _endpoint(self, function: str) -> str:
+        rest = f"/{self._rest}" if self._rest else ""
+        return f"{self._url}{rest}/rpc/{function}"
+
+    def _headers(self) -> dict[str, str]:
+        return {
+            "apikey": self._key,
+            "Authorization": f"Bearer {self._key}",
+            "Content-Type": "application/json",
+        }
+
+    async def acquire(self, owner: str) -> None:
+        request_id = str(uuid.uuid4())
+        self._request_id = request_id
+        while True:
+            response = await self._client.post(
+                self._endpoint(self.acquire_function),
+                headers=self._headers(),
+                json={"p_request_id": request_id, "p_owner": owner},
+            )
+            response.raise_for_status()
+            body = response.json()
+            if not isinstance(body, list) or not body or not isinstance(body[0], dict):
+                raise RuntimeError("Supabase returned an invalid governor decision.")
+            decision = body[0]
+            if bool(decision.get("granted")):
+                return
+            delay = max(float(decision.get("retry_after_seconds", 0.05)), 0.01)
+            await self._clock.sleep(delay)
+
+    async def release(self) -> None:
+        if self._request_id is None:
+            return
+        response = await self._client.post(
+            self._endpoint(self.release_function),
+            headers=self._headers(),
+            json={"p_request_id": self._request_id},
+        )
+        response.raise_for_status()
+        self._request_id = None
+
+    async def aclose(self) -> None:
+        if self._owns_client:
+            await self._client.aclose()
+
+
+def _configured_admission() -> SupabaseWikimediaAdmission | None:
+    url = os.environ.get("SUPABASE_URL")
+    key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+    if not url or not key:
+        if os.environ.get("WIKIGRAPH_ENV") == "production":
+            raise RuntimeError(
+                "Production Wikimedia arbitration requires Supabase configuration."
+            )
+        return None
+    return SupabaseWikimediaAdmission(url, key)
+
+
+DEFAULT_GOVERNOR = GlobalWikimediaGovernor(admission=_configured_admission())
