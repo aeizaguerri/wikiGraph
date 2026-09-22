@@ -19,6 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
 
 from wikigraph.crawler import CrawlRequest
+from wikigraph.governor import DEFAULT_GOVERNOR, GlobalWikimediaGovernor
 from wikigraph.mediawiki import MediaWikiClient
 from wikigraph.runs import (
     CrawlRunHandle,
@@ -84,8 +85,9 @@ def _error(status: int, code: str, message: str) -> HTTPException:
 def create_app(
     mediawiki_transport: httpx.AsyncBaseTransport | None = None,
     run_store: CrawlRunStore | None = None,
+    governor: GlobalWikimediaGovernor = DEFAULT_GOVERNOR,
 ) -> FastAPI:
-    store = run_store if run_store is not None else InMemoryCrawlRunStore()
+    store = run_store if run_store is not None else InMemoryCrawlRunStore(governor)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -114,7 +116,12 @@ def create_app(
                 f'but the selected edition is "{body.language}". Match them and try again.',
             )
         language = parsed.language or body.language
-        client = MediaWikiClient(language, transport=mediawiki_transport)
+        client = MediaWikiClient(
+            language,
+            transport=mediawiki_transport,
+            governor=governor,
+            owner="launch-validation",
+        )
         try:
             resolved = await client.resolve_titles([parsed.title])
         finally:

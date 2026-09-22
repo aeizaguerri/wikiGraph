@@ -13,6 +13,7 @@ import httpx
 
 from wikigraph.communities import CommunityAssignment, detect_communities
 from wikigraph.crawler import CrawlRequest, Crawler, CrawlResult, Progress
+from wikigraph.governor import DEFAULT_GOVERNOR, GlobalWikimediaGovernor
 
 
 class RunStatus(str, Enum):
@@ -44,6 +45,7 @@ class CrawlRun:
         persist_progress: Callable[[Progress], None] | None = None,
         persist_completion: Callable[["CrawlRun"], None] | None = None,
         persist_failure: Callable[["CrawlRun"], None] | None = None,
+        governor: GlobalWikimediaGovernor = DEFAULT_GOVERNOR,
     ) -> None:
         self.id = run_id
         self.request = request
@@ -59,6 +61,7 @@ class CrawlRun:
         self._persist_progress = persist_progress
         self._persist_completion = persist_completion
         self._persist_failure = persist_failure
+        self._governor = governor
 
     def subscribe(self) -> asyncio.Queue[RunEvent]:
         queue: asyncio.Queue[RunEvent] = asyncio.Queue()
@@ -82,7 +85,11 @@ class CrawlRun:
     async def start(self, transport: httpx.AsyncBaseTransport | None) -> None:
         try:
             crawler = Crawler(
-                self.request, transport=transport, on_progress=self._record_progress
+                self.request,
+                transport=transport,
+                on_progress=self._record_progress,
+                governor=self._governor,
+                owner=self.id,
             )
             result = await crawler.crawl()
             self.result = result
@@ -157,13 +164,14 @@ class CrawlRunStore(Protocol):
 class InMemoryCrawlRunStore:
     """Runs live in memory keyed by run identifier; nothing survives a restart."""
 
-    def __init__(self) -> None:
+    def __init__(self, governor: GlobalWikimediaGovernor = DEFAULT_GOVERNOR) -> None:
         self._runs: dict[str, CrawlRun] = {}
+        self._governor = governor
 
     def start_run(
         self, request: CrawlRequest, transport: httpx.AsyncBaseTransport | None
     ) -> CrawlRun:
-        run = CrawlRun(uuid.uuid4().hex, request)
+        run = CrawlRun(uuid.uuid4().hex, request, governor=self._governor)
         run.task = asyncio.create_task(run.start(transport))
         self._runs[run.id] = run
         return run
@@ -201,6 +209,7 @@ class SupabaseCrawlRunStore:
         *,
         client: httpx.Client | None = None,
         rest_path: str = "/rest/v1",
+        governor: GlobalWikimediaGovernor = DEFAULT_GOVERNOR,
     ) -> None:
         self._url = (url or os.environ.get("SUPABASE_URL", "")).rstrip("/")
         self._key = key or os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
@@ -209,6 +218,8 @@ class SupabaseCrawlRunStore:
             raise PersistenceError("Supabase configuration is unavailable.")
         self._client = client or httpx.Client(timeout=20.0)
         self._owns_client = client is None
+        self._governor = governor
+        self._runs: dict[str, CrawlRun] = {}
 
     @property
     def _endpoint(self) -> str:
@@ -264,11 +275,16 @@ class SupabaseCrawlRunStore:
             persist_progress=lambda progress: self._save_progress(run_id, progress),
             persist_completion=lambda completed: self._save_completion(completed),
             persist_failure=lambda failed: self._save_failure(failed),
+            governor=self._governor,
         )
         run.task = asyncio.create_task(run.start(transport))
+        self._runs[run_id] = run
         return run
 
     def get(self, run_id: str) -> CrawlRun | None:
+        active = self._runs.get(run_id)
+        if active is not None:
+            return active
         records = self._request(
             "GET",
             headers=self._headers(),
@@ -283,8 +299,9 @@ class SupabaseCrawlRunStore:
             depth=int(row["depth"]),
             node_cap=int(row["node_cap"]),
         )
-        run = CrawlRun(run_id, request)
+        run = CrawlRun(run_id, request, governor=self._governor)
         _hydrate_run(run, row)
+        self._runs[run_id] = run
         return run
 
     def _save_progress(self, run_id: str, progress: Progress) -> None:
