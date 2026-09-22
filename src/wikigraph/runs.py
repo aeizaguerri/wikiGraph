@@ -21,6 +21,7 @@ from wikigraph.crawler import (
     GraphNode,
     Progress,
 )
+from wikigraph.governor import DEFAULT_GOVERNOR, GlobalWikimediaGovernor
 
 
 class RunStatus(str, Enum):
@@ -55,6 +56,7 @@ class CrawlRun:
         persist_checkpoint: Callable[[CrawlCheckpoint], None] | None = None,
         persist_completion: Callable[["CrawlRun"], None] | None = None,
         persist_failure: Callable[["CrawlRun"], None] | None = None,
+        governor: GlobalWikimediaGovernor = DEFAULT_GOVERNOR,
         persist_recovery: Callable[["CrawlRun"], None] | None = None,
         checkpoint: CrawlCheckpoint | None = None,
     ) -> None:
@@ -73,6 +75,7 @@ class CrawlRun:
         self._persist_checkpoint = persist_checkpoint
         self._persist_completion = persist_completion
         self._persist_failure = persist_failure
+        self._governor = governor
         self._persist_recovery = persist_recovery
         self._checkpoint = checkpoint
 
@@ -101,6 +104,8 @@ class CrawlRun:
                 self.request,
                 transport=transport,
                 on_progress=self._record_progress,
+                governor=self._governor,
+                owner=self.id,
                 checkpoint=self._checkpoint,
                 on_checkpoint=self._record_checkpoint,
             )
@@ -193,14 +198,18 @@ class CrawlRunStore(Protocol):
 class InMemoryCrawlRunStore:
     """Runs live in memory keyed by run identifier; nothing survives a restart."""
 
-    def __init__(self) -> None:
+    def __init__(self, governor: GlobalWikimediaGovernor = DEFAULT_GOVERNOR) -> None:
         self._runs: dict[str, CrawlRun] = {}
+        self._governor = governor
 
     def start_run(
         self, request: CrawlRequest, transport: httpx.AsyncBaseTransport | None
     ) -> CrawlRun:
         run = CrawlRun(
-            uuid.uuid4().hex, request, checkpoint=_initial_checkpoint(request)
+            uuid.uuid4().hex,
+            request,
+            governor=self._governor,
+            checkpoint=_initial_checkpoint(request),
         )
         run.task = asyncio.create_task(run.start(transport))
         self._runs[run.id] = run
@@ -217,7 +226,12 @@ class InMemoryCrawlRunStore:
             raise PersistenceError("No crawl run with that identifier.")
         if current.status is not RunStatus.RECOVERABLE:
             raise PersistenceError("Only recoverable crawl runs can be retried.")
-        run = CrawlRun(run_id, current.request, checkpoint=current._checkpoint)
+        run = CrawlRun(
+            run_id,
+            current.request,
+            governor=self._governor,
+            checkpoint=current._checkpoint,
+        )
         run.task = asyncio.create_task(run.start(transport))
         self._runs[run_id] = run
         return run
@@ -252,6 +266,7 @@ class SupabaseCrawlRunStore:
         *,
         client: httpx.Client | None = None,
         rest_path: str = "/rest/v1",
+        governor: GlobalWikimediaGovernor = DEFAULT_GOVERNOR,
     ) -> None:
         self._url = (url or os.environ.get("SUPABASE_URL", "")).rstrip("/")
         self._key = key or os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
@@ -260,6 +275,7 @@ class SupabaseCrawlRunStore:
             raise PersistenceError("Supabase configuration is unavailable.")
         self._client = client or httpx.Client(timeout=20.0)
         self._owns_client = client is None
+        self._governor = governor
         self._runs: dict[str, CrawlRun] = {}
 
     @property
@@ -318,6 +334,7 @@ class SupabaseCrawlRunStore:
             persist_checkpoint=lambda checkpoint: self._save_checkpoint(run_id, checkpoint),
             persist_completion=lambda completed: self._save_completion(completed),
             persist_failure=lambda failed: self._save_failure(failed),
+            governor=self._governor,
             persist_recovery=lambda recovered: self._save_recovery(recovered),
         )
         run.task = asyncio.create_task(run.start(transport))
@@ -325,6 +342,9 @@ class SupabaseCrawlRunStore:
         return run
 
     def get(self, run_id: str) -> CrawlRun | None:
+        active = self._runs.get(run_id)
+        if active is not None:
+            return active
         records = self._request(
             "GET",
             headers=self._headers(),
@@ -340,8 +360,14 @@ class SupabaseCrawlRunStore:
             node_cap=int(row["node_cap"]),
         )
         checkpoint = _checkpoint_from_json(row.get("checkpoint"))
-        run = CrawlRun(run_id, request, checkpoint=checkpoint)
+        run = CrawlRun(
+            run_id,
+            request,
+            governor=self._governor,
+            checkpoint=checkpoint,
+        )
         _hydrate_run(run, row)
+        self._runs[run_id] = run
         return run
 
     def retry_run(
@@ -370,6 +396,7 @@ class SupabaseCrawlRunStore:
         run = CrawlRun(
             run_id,
             request,
+            governor=self._governor,
             checkpoint=checkpoint,
             persist_progress=lambda progress: self._save_progress(run_id, progress),
             persist_checkpoint=lambda value: self._save_checkpoint(run_id, value),

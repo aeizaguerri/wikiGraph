@@ -9,7 +9,9 @@ import httpx
 
 from tests.helpers import fetch_graph
 from tests.stub import FakeMediaWiki
+from benchmarks.ticket19_representative import DeterministicClock
 from wikigraph.app import create_app
+from wikigraph.governor import GlobalWikimediaGovernor
 from wikigraph.runs import SupabaseCrawlRunStore
 
 
@@ -41,6 +43,7 @@ def store(database: PostgrestRuns) -> SupabaseCrawlRunStore:
         "https://supabase.test",
         "test-only-key",
         client=httpx.Client(transport=database.transport()),
+        governor=GlobalWikimediaGovernor(DeterministicClock()),
     )
 
 

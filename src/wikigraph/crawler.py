@@ -9,6 +9,7 @@ from dataclasses import dataclass
 import httpx
 
 from wikigraph.mediawiki import ARTICLE_LINK_BATCH_SIZE, MediaWikiClient
+from wikigraph.governor import DEFAULT_GOVERNOR, GlobalWikimediaGovernor
 from wikigraph.titles import clean_title
 
 DEFAULT_NODE_CAP = 500
@@ -79,17 +80,26 @@ class Crawler:
         request: CrawlRequest,
         transport: httpx.AsyncBaseTransport | None = None,
         on_progress: Callable[[Progress], Awaitable[None]] | None = None,
+        governor: GlobalWikimediaGovernor = DEFAULT_GOVERNOR,
+        owner: str | None = None,
         checkpoint: CrawlCheckpoint | None = None,
         on_checkpoint: Callable[[CrawlCheckpoint], Awaitable[None]] | None = None,
     ) -> None:
         self._request = request
         self._transport = transport
         self._on_progress = on_progress
+        self._governor = governor
+        self._owner = owner or request.seed
         self._checkpoint = checkpoint
         self._on_checkpoint = on_checkpoint
 
     async def crawl(self) -> CrawlResult:
-        client = MediaWikiClient(self._request.language, transport=self._transport)
+        client = MediaWikiClient(
+            self._request.language,
+            transport=self._transport,
+            governor=self._governor,
+            owner=self._owner,
+        )
         try:
             return await self._crawl(client)
         finally:
@@ -134,6 +144,9 @@ class Crawler:
                         if link.namespace == ARTICLE_NAMESPACE
                         and (cleaned := clean_title(link.title))
                     )
+                # Publish acquisition progress before redirect resolution, which
+                # may wait behind the same deployment-wide request budget.
+                await self._emit_progress(crawled, len(nodes), level, recent)
                 if candidates:
                     truncated |= await self._discover(
                         client,

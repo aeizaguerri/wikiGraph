@@ -16,7 +16,9 @@ import pytest
 
 from tests.helpers import fetch_graph
 from tests.stub import FakeMediaWiki
+from benchmarks.ticket19_representative import DeterministicClock
 from wikigraph.app import create_app
+from wikigraph.governor import GlobalWikimediaGovernor
 from wikigraph.runs import SupabaseCrawlRunStore
 
 
@@ -30,7 +32,12 @@ pytestmark = pytest.mark.skipif(
 
 def _store() -> SupabaseCrawlRunStore:
     assert POSTGREST_URL is not None and POSTGREST_KEY is not None
-    return SupabaseCrawlRunStore(POSTGREST_URL, POSTGREST_KEY, rest_path="")
+    return SupabaseCrawlRunStore(
+        POSTGREST_URL,
+        POSTGREST_KEY,
+        rest_path="",
+        governor=GlobalWikimediaGovernor(DeterministicClock()),
+    )
 
 
 async def _wait_status(run_id: str, status: str) -> None:
