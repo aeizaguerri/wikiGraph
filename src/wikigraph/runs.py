@@ -184,6 +184,91 @@ class PersistenceError(RuntimeError):
     """The canonical run store could not accept or persist a run operation."""
 
 
+@dataclass(frozen=True)
+class LaunchAdmissionDecision:
+    admitted: bool
+    code: str
+
+
+class LaunchAdmissionStore(Protocol):
+    def admit(
+        self,
+        ip_hash: str,
+        *,
+        per_ip_per_minute: int,
+        deployment_per_minute: int,
+        per_ip_per_day: int,
+        max_ip_keys: int,
+    ) -> LaunchAdmissionDecision: ...
+
+    def close(self) -> None: ...
+
+
+class SupabaseLaunchAdmissionStore:
+    """Atomic launch admission backed by the canonical Supabase database."""
+
+    def __init__(
+        self,
+        url: str | None = None,
+        key: str | None = None,
+        *,
+        client: httpx.Client | None = None,
+        rest_path: str = "/rest/v1",
+    ) -> None:
+        self._url = (url or os.environ.get("SUPABASE_URL", "")).rstrip("/")
+        self._key = key or os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
+        self._rest_path = rest_path.strip("/")
+        if not self._url or not self._key:
+            raise PersistenceError("Supabase configuration is unavailable.")
+        self._client = client or httpx.Client(timeout=20.0)
+        self._owns_client = client is None
+
+    @property
+    def _endpoint(self) -> str:
+        rest_path = f"/{self._rest_path}" if self._rest_path else ""
+        return f"{self._url}{rest_path}/rpc/admit_crawl_launch"
+
+    def admit(
+        self,
+        ip_hash: str,
+        *,
+        per_ip_per_minute: int,
+        deployment_per_minute: int,
+        per_ip_per_day: int,
+        max_ip_keys: int,
+    ) -> LaunchAdmissionDecision:
+        try:
+            response = self._client.post(
+                self._endpoint,
+                headers={
+                    "apikey": self._key,
+                    "Authorization": f"Bearer {self._key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "p_ip_hash": ip_hash,
+                    "p_per_ip_per_minute": per_ip_per_minute,
+                    "p_deployment_per_minute": deployment_per_minute,
+                    "p_per_ip_per_day": per_ip_per_day,
+                    "p_max_ip_keys": max_ip_keys,
+                },
+            )
+            response.raise_for_status()
+            body = response.json()
+        except (httpx.HTTPError, OSError, ValueError) as exc:
+            raise PersistenceError("Supabase launch admission failed.") from exc
+        if not isinstance(body, list) or not body or not isinstance(body[0], dict):
+            raise PersistenceError("Supabase returned an invalid launch admission.")
+        result = body[0]
+        return LaunchAdmissionDecision(
+            admitted=bool(result.get("admitted")), code=str(result.get("code", "unknown"))
+        )
+
+    def close(self) -> None:
+        if self._owns_client:
+            self._client.close()
+
+
 class SupabaseCrawlRunStore:
     """Crawl run store backed by Supabase's server-side PostgREST API.
 

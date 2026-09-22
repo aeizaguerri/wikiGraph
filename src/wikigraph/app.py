@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import json
 import os
 import time
@@ -29,6 +31,8 @@ from wikigraph.runs import (
     CrawlRunHandle,
     CrawlRunStore,
     InMemoryCrawlRunStore,
+    LaunchAdmissionDecision,
+    LaunchAdmissionStore,
     PersistenceError,
     RunStatus,
     TERMINAL_EVENT_TYPES,
@@ -95,6 +99,7 @@ class LaunchLimits:
     per_ip_per_minute: int = 5
     deployment_per_minute: int = 30
     per_ip_per_day: int = 50
+    max_ip_keys: int = 10_000
 
     @classmethod
     def from_environment(cls) -> "LaunchLimits":
@@ -102,6 +107,7 @@ class LaunchLimits:
             per_ip_per_minute=_positive_setting("WIKIGRAPH_LAUNCHES_PER_IP", 5),
             deployment_per_minute=_positive_setting("WIKIGRAPH_LAUNCHES_PER_MINUTE", 30),
             per_ip_per_day=_positive_setting("WIKIGRAPH_LAUNCH_QUOTA", 50),
+            max_ip_keys=_positive_setting("WIKIGRAPH_LAUNCH_IP_KEYS", 10_000),
         )
 
 
@@ -171,6 +177,7 @@ def validate_production_configuration() -> None:
             "SUPABASE_URL",
             "SUPABASE_SERVICE_ROLE_KEY",
             "WIKIGRAPH_USER_AGENT",
+            "WIKIGRAPH_IP_HASH_SECRET",
         )
         if not os.environ.get(name)
     ]
@@ -181,6 +188,23 @@ def validate_production_configuration() -> None:
         )
 
 
+def _hash_client_ip(client_ip: str) -> str:
+    secret = os.environ.get("WIKIGRAPH_IP_HASH_SECRET", "local-development-only")
+    return hmac.new(secret.encode(), client_ip.encode(), hashlib.sha256).hexdigest()
+
+
+def _require_admission(decision: LaunchAdmissionDecision) -> None:
+    if decision.admitted:
+        return
+    messages = {
+        "launch_rate_limited": "Too many crawl launches right now. Try again shortly.",
+        "launch_quota_exceeded": "This address has reached its crawl quota. Try again tomorrow.",
+        "storage_quota_exceeded": "The crawl launch service is at capacity. Try again later.",
+    }
+    status = 429 if decision.code in messages else 503
+    raise _error(status, decision.code, messages.get(decision.code, "Launch admission is unavailable."))
+
+
 def create_app(
     mediawiki_transport: httpx.AsyncBaseTransport | None = None,
     run_store: CrawlRunStore | None = None,
@@ -188,20 +212,31 @@ def create_app(
     launch_limits: LaunchLimits | None = None,
     clock: Callable[[], float] = time.monotonic,
     production: bool | None = None,
+    launch_admission_store: LaunchAdmissionStore | None = None,
 ) -> FastAPI:
     store = run_store if run_store is not None else InMemoryCrawlRunStore()
-    limiter = LaunchLimiter(launch_limits or LaunchLimits.from_environment(), clock)
+    limits = launch_limits or LaunchLimits.from_environment()
     require_production_config = (
         production
         if production is not None
         else os.environ.get("WIKIGRAPH_ENV") == "production"
     )
+    if require_production_config:
+        validate_production_configuration()
+    admission_store = launch_admission_store
+    if admission_store is None and require_production_config:
+        from wikigraph.runs import SupabaseLaunchAdmissionStore
+
+        admission_store = SupabaseLaunchAdmissionStore()
+    limiter = None if admission_store is not None else LaunchLimiter(limits, clock)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         if require_production_config:
             validate_production_configuration()
         yield
+        if admission_store is not None:
+            admission_store.close()
         await store.shutdown()
 
     app = FastAPI(title="wikiGraph", lifespan=lifespan)
@@ -259,7 +294,23 @@ def create_app(
                 "not_an_article",
                 f'"{seed_resolution.title}" is not an article in this edition.',
             )
-        limiter.admit(request.client.host if request.client is not None else "unknown")
+        client_ip = request.client.host if request.client is not None else "unknown"
+        ip_hash = _hash_client_ip(client_ip)
+        if admission_store is not None:
+            try:
+                decision = admission_store.admit(
+                    ip_hash,
+                    per_ip_per_minute=limits.per_ip_per_minute,
+                    deployment_per_minute=limits.deployment_per_minute,
+                    per_ip_per_day=limits.per_ip_per_day,
+                    max_ip_keys=limits.max_ip_keys,
+                )
+            except PersistenceError as exc:
+                raise _error(503, "launch_admission_unavailable", str(exc)) from exc
+            _require_admission(decision)
+        else:
+            assert limiter is not None
+            limiter.admit(client_ip)
         crawl_request = CrawlRequest(
             seed=seed_resolution.title,
             depth=body.depth,
