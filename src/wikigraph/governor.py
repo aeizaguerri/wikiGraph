@@ -41,6 +41,8 @@ class _Request:
     owner: str
     operation: Callable[[], Awaitable[object]]
     result: asyncio.Future[object]
+    operation_task: asyncio.Task[object] | None = None
+    cancelled: bool = False
 
 
 class GlobalWikimediaGovernor:
@@ -76,14 +78,22 @@ class GlobalWikimediaGovernor:
     async def request(self, owner: str, operation: Callable[[], Awaitable[T]]) -> T:
         loop = asyncio.get_running_loop()
         future: asyncio.Future[object] = loop.create_future()
+        request = _Request(owner, operation, future)
         queue = self._queues.setdefault(owner, deque())
-        queue.append(_Request(owner, operation, future))
+        queue.append(request)
         if owner not in self._owners:
             self._owners.append(owner)
         self._wake.set()
         if self._worker is None or self._worker.done():
             self._worker = asyncio.create_task(self._dispatch())
-        return await future  # type: ignore[return-value]
+        try:
+            return await future  # type: ignore[return-value]
+        except asyncio.CancelledError:
+            request.cancelled = True
+            future.cancel()
+            if request.operation_task is not None:
+                request.operation_task.cancel()
+            raise
 
     async def _dispatch(self) -> None:
         while self._owners:
@@ -94,7 +104,11 @@ class GlobalWikimediaGovernor:
                 self._owners.append(owner)
             else:
                 del self._queues[owner]
+            if request.cancelled or request.result.cancelled():
+                continue
             await self._wait_for_capacity()
+            if request.cancelled or request.result.cancelled():
+                continue
             started = self._clock.now()
             self._starts.append(started)
             self._attempts.append(started)
@@ -102,10 +116,13 @@ class GlobalWikimediaGovernor:
             self._in_flight += 1
             self.max_in_flight = max(self.max_in_flight, self._in_flight)
             try:
-                if self._admission is not None:
-                    await self._admission.acquire(request.owner)
-                result = await request.operation()
+                request.operation_task = asyncio.create_task(
+                    self._run_operation(request)
+                )
+                result = await request.operation_task
             except asyncio.CancelledError:
+                if request.result.cancelled():
+                    continue
                 if not request.result.done():
                     request.result.cancel()
                 raise
@@ -116,9 +133,15 @@ class GlobalWikimediaGovernor:
                 if not request.result.done():
                     request.result.set_result(result)
             finally:
+                request.operation_task = None
                 if self._admission is not None:
                     await self._admission.release()
                 self._in_flight -= 1
+
+    async def _run_operation(self, request: _Request) -> object:
+        if self._admission is not None:
+            await self._admission.acquire(request.owner)
+        return await request.operation()
 
     async def _wait_for_capacity(self) -> None:
         while True:
