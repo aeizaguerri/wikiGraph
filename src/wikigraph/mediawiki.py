@@ -87,7 +87,6 @@ class MediaWikiClient:
         self._governor = governor
         self._owner = owner
         self._cache = cache if cache is not None else InMemoryResponseCache()
-        self._cache = cache if cache is not None else InMemoryResponseCache()
         self._clock = clock or SystemClock()
         self._jitter = jitter or (lambda value: value * random.uniform(0.5, 1.5))
         self._wall_clock = wall_clock
