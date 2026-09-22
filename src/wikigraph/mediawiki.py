@@ -3,12 +3,19 @@
 from __future__ import annotations
 
 import os
+import random
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
 import httpx
 
-from wikigraph.governor import DEFAULT_GOVERNOR, GlobalWikimediaGovernor
+from wikigraph.governor import (
+    Clock,
+    DEFAULT_GOVERNOR,
+    GlobalWikimediaGovernor,
+    SystemClock,
+)
 
 RESOLVE_BATCH_SIZE = 50
 ARTICLE_LINK_BATCH_SIZE = 50
@@ -43,6 +50,15 @@ class MediaWikiError(RuntimeError):
     pass
 
 
+class UpstreamOverload(MediaWikiError):
+    """The provider asked us to stop and the run may safely be resumed."""
+
+    def __init__(self, message: str, *, attempts: int, retry_after: float) -> None:
+        super().__init__(message)
+        self.attempts = attempts
+        self.retry_after = retry_after
+
+
 class MediaWikiClient:
     """Talks to `{language}.wikipedia.org/w/api.php` over HTTP."""
 
@@ -53,10 +69,14 @@ class MediaWikiClient:
         *,
         governor: GlobalWikimediaGovernor = DEFAULT_GOVERNOR,
         owner: str = "launch-validation",
+        clock: Clock | None = None,
+        jitter: Callable[[float], float] | None = None,
     ) -> None:
         self._language = language
         self._governor = governor
         self._owner = owner
+        self._clock = clock or SystemClock()
+        self._jitter = jitter or (lambda value: value * random.uniform(0.5, 1.5))
         self._http = httpx.AsyncClient(
             base_url=f"https://{language}.wikipedia.org",
             headers={"User-Agent": configured_user_agent()},
@@ -149,20 +169,60 @@ class MediaWikiClient:
         return ResolvedTitle(page["title"], page.get("ns", 0), "missing" in page)
 
     async def _get(self, params: dict[str, str]) -> dict[str, Any]:
-        response = await self._governor.request(
-            self._owner, lambda: self._http.get("/w/api.php", params=params)
-        )
-        if response.status_code != 200:
-            raise MediaWikiError(
-                f"MediaWiki API returned HTTP {response.status_code}"
+        for attempt in range(1, 11):
+            response = await self._governor.request(
+                self._owner, lambda: self._http.get("/w/api.php", params=params)
             )
-        body: dict[str, Any] = response.json()
-        if "error" in body:
-            error = body["error"]
-            raise MediaWikiError(
-                f"MediaWiki API error: {error.get('code', 'unknown')}"
-            )
-        return body
+            overload = response.status_code in {429, 503}
+            try:
+                body: dict[str, Any] = response.json()
+            except ValueError:
+                body = {}
+            error = body.get("error")
+            if (
+                isinstance(error, dict)
+                and str(error.get("code", "")).lower() == "maxlag"
+            ):
+                overload = True
+            if not overload:
+                if response.status_code != 200:
+                    raise MediaWikiError(
+                        f"MediaWiki API returned HTTP {response.status_code}"
+                    )
+                if "error" in body:
+                    code = (
+                        error.get("code", "unknown")
+                        if isinstance(error, dict)
+                        else "unknown"
+                    )
+                    raise MediaWikiError(f"MediaWiki API error: {code}")
+                return body
+
+            delay = self._retry_delay(response, error, attempt)
+            await self._governor.record_overload(delay)
+            if attempt == 10:
+                raise UpstreamOverload(
+                    "Wikimedia is still applying flow control after ten attempts.",
+                    attempts=attempt,
+                    retry_after=delay,
+                )
+            await self._clock.sleep(delay)
+        raise AssertionError("overload retry loop did not terminate")
+
+    def _retry_delay(
+        self, response: httpx.Response, error: Any, attempt: int
+    ) -> float:
+        supplied = response.headers.get("Retry-After")
+        if supplied is None and isinstance(error, dict):
+            lag = error.get("lag")
+            if isinstance(lag, (int, float)):
+                supplied = str(lag)
+        if supplied is not None:
+            try:
+                return min(45.0, max(0.0, float(supplied)))
+            except ValueError:
+                pass
+        return min(45.0, max(0.0, self._jitter(float(2 ** (attempt - 1)))))
 
     async def aclose(self) -> None:
         await self._http.aclose()

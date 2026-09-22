@@ -27,6 +27,8 @@ class WikimediaAdmission(Protocol):
 
     async def release(self) -> None: ...
 
+    async def set_cooldown(self, delay: float) -> None: ...
+
 
 class SystemClock:
     def now(self) -> float:
@@ -74,6 +76,16 @@ class GlobalWikimediaGovernor:
         self._in_flight = 0
         self.max_in_flight = 0
         self.dispatch_log: list[tuple[str, float]] = []
+        self._cooldown_until = 0.0
+
+    async def record_overload(self, delay: float) -> None:
+        """Make provider backpressure constrain every subsequent request."""
+        until = self._clock.now() + max(0.0, delay)
+        self._cooldown_until = max(self._cooldown_until, until)
+        if self._admission is not None:
+            set_cooldown = getattr(self._admission, "set_cooldown", None)
+            if set_cooldown is not None:
+                await set_cooldown(delay)
 
     async def request(self, owner: str, operation: Callable[[], Awaitable[T]]) -> T:
         loop = asyncio.get_running_loop()
@@ -94,6 +106,10 @@ class GlobalWikimediaGovernor:
             if request.operation_task is not None:
                 request.operation_task.cancel()
             raise
+
+    @property
+    def clock(self) -> Clock:
+        return self._clock
 
     async def _dispatch(self) -> None:
         while self._owners:
@@ -156,6 +172,8 @@ class GlobalWikimediaGovernor:
                 waits.append(self._starts[0] + 1.0 - now)
             if len(self._attempts) >= self.MAX_ATTEMPTS_PER_MINUTE:
                 waits.append(self._attempts[0] + 60.0 - now)
+            if self._cooldown_until > now:
+                waits.append(self._cooldown_until - now)
             delay = max(waits, default=0.0)
             if delay <= 0:
                 return
@@ -249,6 +267,14 @@ class SupabaseWikimediaAdmission:
         )
         response.raise_for_status()
         self._request_id = None
+
+    async def set_cooldown(self, delay: float) -> None:
+        response = await self._client.post(
+            self._endpoint("set_wikimedia_cooldown"),
+            headers=self._headers(),
+            json={"p_delay_seconds": max(0.0, delay)},
+        )
+        response.raise_for_status()
 
     async def aclose(self) -> None:
         if self._owns_client:

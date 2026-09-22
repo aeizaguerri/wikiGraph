@@ -22,10 +22,12 @@ from wikigraph.crawler import (
     Progress,
 )
 from wikigraph.governor import DEFAULT_GOVERNOR, GlobalWikimediaGovernor
+from wikigraph.mediawiki import UpstreamOverload
 
 
 class RunStatus(str, Enum):
     RUNNING = "running"
+    OVERLOAD_WAITING = "overload_waiting"
     RECOVERABLE = "recoverable"
     COMPLETED = "completed"
     FAILED = "failed"
@@ -35,7 +37,13 @@ PROGRESS_EVENT = "progress"
 COMPLETED_EVENT = "completed"
 FAILED_EVENT = "failed"
 RECOVERABLE_EVENT = "recoverable"
-TERMINAL_EVENT_TYPES = {COMPLETED_EVENT, FAILED_EVENT, RECOVERABLE_EVENT}
+OVERLOAD_WAITING_EVENT = "overload_waiting"
+TERMINAL_EVENT_TYPES = {
+    COMPLETED_EVENT,
+    FAILED_EVENT,
+    RECOVERABLE_EVENT,
+    OVERLOAD_WAITING_EVENT,
+}
 
 
 @dataclass(frozen=True)
@@ -78,6 +86,7 @@ class CrawlRun:
         self._governor = governor
         self._persist_recovery = persist_recovery
         self._checkpoint = checkpoint
+        self.retry_state: dict[str, Any] | None = None
 
     def subscribe(self) -> asyncio.Queue[RunEvent]:
         queue: asyncio.Queue[RunEvent] = asyncio.Queue()
@@ -119,6 +128,21 @@ class CrawlRun:
             if self._persist_completion is not None:
                 self._persist_completion(self)
             self.publish(RunEvent(COMPLETED_EVENT, {"truncated": result.truncated}))
+        except UpstreamOverload as exc:
+            self.status = RunStatus.OVERLOAD_WAITING
+            self.error = str(exc)
+            self.retry_state = {
+                "attempts": exc.attempts,
+                "retry_after": exc.retry_after,
+            }
+            if self._persist_recovery is not None:
+                self._persist_recovery(self)
+            self.publish(
+                RunEvent(
+                    OVERLOAD_WAITING_EVENT,
+                    {"error": self.error, "retryAfter": exc.retry_after},
+                )
+            )
         except asyncio.CancelledError:
             self.status = RunStatus.RECOVERABLE
             self.error = "The crawl process was interrupted; retry to resume."
@@ -225,7 +249,8 @@ class InMemoryCrawlRunStore:
         if current is None:
             raise PersistenceError("No crawl run with that identifier.")
         if current.status is not RunStatus.RECOVERABLE:
-            raise PersistenceError("Only recoverable crawl runs can be retried.")
+            if current.status is not RunStatus.OVERLOAD_WAITING:
+                raise PersistenceError("Only recoverable crawl runs can be retried.")
         run = CrawlRun(
             run_id,
             current.request,
@@ -466,7 +491,10 @@ class SupabaseCrawlRunStore:
         if not records:
             raise PersistenceError("No crawl run with that identifier.")
         row = records[0]
-        if row.get("status") != RunStatus.RECOVERABLE.value:
+        if row.get("status") not in {
+            RunStatus.RECOVERABLE.value,
+            RunStatus.OVERLOAD_WAITING.value,
+        }:
             raise PersistenceError("Only recoverable crawl runs can be retried.")
         request = CrawlRequest(
             seed=str(row["seed"]),
@@ -477,7 +505,10 @@ class SupabaseCrawlRunStore:
         checkpoint = _checkpoint_from_json(row.get("checkpoint"))
         if checkpoint is None:
             raise PersistenceError("Recoverable crawl run has no checkpoint.")
-        self._patch(run_id, {"status": RunStatus.RUNNING.value, "error": None})
+        self._patch(
+            run_id,
+            {"status": RunStatus.RUNNING.value, "error": None, "retry_state": None},
+        )
         run = CrawlRun(
             run_id,
             request,
@@ -534,7 +565,15 @@ class SupabaseCrawlRunStore:
     def _save_recovery(self, run: CrawlRun) -> None:
         self._patch(
             run.id,
-            {"status": RunStatus.RECOVERABLE.value, "error": run.error},
+            {
+                "status": (
+                    RunStatus.OVERLOAD_WAITING.value
+                    if run.status is RunStatus.OVERLOAD_WAITING
+                    else RunStatus.RECOVERABLE.value
+                ),
+                "error": run.error,
+                "retry_state": run.retry_state,
+            },
         )
 
     def _patch(self, run_id: str, values: dict[str, Any]) -> None:
@@ -628,6 +667,8 @@ def _hydrate_run(run: CrawlRun, row: dict[str, Any]) -> None:
     status = RunStatus(str(row.get("status", RunStatus.RUNNING.value)))
     run.status = status
     run.error = row.get("error")
+    retry_state = row.get("retry_state")
+    run.retry_state = retry_state if isinstance(retry_state, dict) else None
     progress = row.get("progress")
     if isinstance(progress, dict):
         run.publish(RunEvent(PROGRESS_EVENT, progress))
@@ -661,6 +702,16 @@ def _hydrate_run(run: CrawlRun, row: dict[str, Any]) -> None:
             RunEvent(
                 RECOVERABLE_EVENT,
                 {"error": run.error or "The crawl run can be resumed."},
+            )
+        )
+    elif status is RunStatus.OVERLOAD_WAITING:
+        run.publish(
+            RunEvent(
+                OVERLOAD_WAITING_EVENT,
+                {
+                    "error": run.error or "Wikimedia overload; retry to resume.",
+                    "retryAfter": (row.get("retry_state") or {}).get("retry_after"),
+                },
             )
         )
     if status is not RunStatus.RUNNING:

@@ -357,6 +357,18 @@ def create_app(
             or run.result is None
             or run.communities is None
         ):
+            if run.status is RunStatus.OVERLOAD_WAITING:
+                raise _error(
+                    409,
+                    "run_overload_waiting",
+                    run.error or "Wikimedia overload; retry to resume.",
+                )
+            if run.status is RunStatus.RECOVERABLE:
+                raise _error(
+                    409,
+                    "run_recoverable",
+                    run.error or "The crawl run can be resumed.",
+                )
             raise _error(
                 409, "run_failed", run.error or "The crawl run failed."
             )

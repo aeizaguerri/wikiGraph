@@ -99,6 +99,7 @@ class Crawler:
             transport=self._transport,
             governor=self._governor,
             owner=self._owner,
+            clock=self._governor.clock,
         )
         try:
             return await self._crawl(client)
