@@ -227,6 +227,7 @@ const launcher = createLauncher(launchForm, async (values) => {
   const { runId } = await response.json();
   syncUrl({ run: runId });
   renderRunState({ runId, status: "running", crawled: 0, discovered: 1, currentDepth: 0, recent: [] });
+  refreshRun(runId).catch((error) => showNotice(error.message));
   watchRun(runId);
   return {};
 });
