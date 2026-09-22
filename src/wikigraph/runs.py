@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import secrets
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -236,6 +237,8 @@ class CrawlRunStore(Protocol):
 
     def healthcheck(self) -> None: ...
 
+    def cleanup_expired(self) -> int: ...
+
     async def shutdown(self) -> None: ...
 
 
@@ -272,6 +275,9 @@ class InMemoryCrawlRunStore:
         """Local tests have no external persistence dependency to verify."""
 
         return None
+
+    def cleanup_expired(self) -> int:
+        return 0
 
     def retry_run(
         self, run_id: str, transport: httpx.AsyncBaseTransport | None
@@ -436,10 +442,13 @@ class SupabaseCrawlRunStore:
 
     @property
     def _endpoint(self) -> str:
+        return self._rest_endpoint(self.table)
+
+    def _rest_endpoint(self, path: str) -> str:
         rest_url = self._url
         if self._rest_path and not rest_url.endswith(f"/{self._rest_path}"):
             rest_url = f"{rest_url}/{self._rest_path}"
-        return f"{rest_url}/{self.table}"
+        return f"{rest_url}/{path}"
 
     def _headers(self, *, representation: bool = False) -> dict[str, str]:
         headers = {
@@ -452,16 +461,57 @@ class SupabaseCrawlRunStore:
         return headers
 
     def healthcheck(self) -> None:
-        """Verify that the configured service-role client can reach PostgREST."""
+        """Verify the runtime schema and the RPCs used by production."""
         self._request(
             "GET",
             headers=self._headers(),
             params={"select": "run_id", "limit": "1"},
         )
+        for table in (
+            "crawl_launch_admission",
+            "crawl_launch_admission_total",
+            "crawl_run_metrics",
+            "upstream_response_cache",
+            "wikimedia_governor_state",
+            "wikimedia_governor_queue",
+        ):
+            self._request_url(
+                self._rest_endpoint(table),
+                "GET",
+                headers=self._headers(),
+                params={"select": "*", "limit": "0"},
+            )
+        self._rpc_request(
+            "admit_crawl_launch",
+            {
+                "p_ip_hash": "invalid",
+                "p_per_ip_per_minute": 1,
+                "p_deployment_per_minute": 1,
+                "p_per_ip_per_day": 1,
+                "p_max_ip_keys": 1,
+            },
+        )
+        self._rpc_request(
+            "expire_crawl_runs", {"p_now": "1970-01-01T00:00:00+00:00"}
+        )
+        self._rpc_request(
+            "release_wikimedia_attempt", {"p_request_id": str(uuid.uuid4())}
+        )
+
+    def _rpc_request(self, function: str, payload: dict[str, Any]) -> list[dict[str, Any]]:
+        return self._request_url(
+            self._rest_endpoint(f"rpc/{function}"),
+            "POST",
+            headers=self._headers(),
+            json=payload,
+        )
 
     def _request(self, method: str, **kwargs: Any) -> list[dict[str, Any]]:
+        return self._request_url(self._endpoint, method, **kwargs)
+
+    def _request_url(self, endpoint: str, method: str, **kwargs: Any) -> list[dict[str, Any]]:
         try:
-            response = self._client.request(method, self._endpoint, **kwargs)
+            response = self._client.request(method, endpoint, **kwargs)
             response.raise_for_status()
         except (httpx.HTTPError, OSError) as exc:
             raise PersistenceError("Supabase persistence operation failed.") from exc
@@ -551,11 +601,7 @@ class SupabaseCrawlRunStore:
     def cleanup_expired(self, now: datetime | None = None) -> int:
         """Remove detailed state through the database-authorized cleanup RPC."""
         cleanup_now = now or self._clock()
-        endpoint = (
-            f"{self._url}/{self._rest_path}/rpc/expire_crawl_runs"
-            if self._rest_path
-            else f"{self._url}/rpc/expire_crawl_runs"
-        )
+        endpoint = self._rest_endpoint("rpc/expire_crawl_runs")
         try:
             response = self._client.post(
                 endpoint,

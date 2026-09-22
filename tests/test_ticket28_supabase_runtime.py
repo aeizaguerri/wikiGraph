@@ -26,18 +26,17 @@ def test_supabase_healthcheck_uses_canonical_postgrest_table() -> None:
 
     store.healthcheck()
 
-    assert client.requests == [
-        {
-            "method": "GET",
-            "url": "https://db.example/rest/v1/crawl_runs",
-            "headers": {
-                "apikey": "secret",
-                "Authorization": "Bearer secret",
-                "Content-Type": "application/json",
-            },
-            "params": {"select": "run_id", "limit": "1"},
-        }
-    ]
+    assert client.requests[0] == {
+        "method": "GET",
+        "url": "https://db.example/rest/v1/crawl_runs",
+        "headers": {
+            "apikey": "secret",
+            "Authorization": "Bearer secret",
+            "Content-Type": "application/json",
+        },
+        "params": {"select": "run_id", "limit": "1"},
+    }
+    assert len(client.requests) == 10
 
 
 def test_supabase_healthcheck_fails_closed() -> None:

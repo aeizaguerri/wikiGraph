@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+import logging
 import os
 import time
 from collections import defaultdict, deque
@@ -45,6 +46,8 @@ STATIC_DIR = Path(__file__).parent / "static"
 SSE_HEARTBEAT_SECONDS = 15.0
 LAUNCH_WINDOW_SECONDS = 60.0
 QUOTA_WINDOW_SECONDS = 24 * 60 * 60
+RETENTION_CLEANUP_INTERVAL_SECONDS = 15 * 60
+logger = logging.getLogger(__name__)
 
 
 class CamelModel(BaseModel):
@@ -142,6 +145,19 @@ def _positive_setting(name: str, default: int) -> int:
         raise RuntimeError(f"{name} must be a positive integer.") from exc
     if value < 1:
         raise RuntimeError(f"{name} must be a positive integer.")
+    return value
+
+
+def _positive_float_setting(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise RuntimeError(f"{name} must be a positive number.") from exc
+    if value <= 0:
+        raise RuntimeError(f"{name} must be a positive number.")
     return value
 
 
@@ -261,16 +277,37 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        retention_task: asyncio.Task[None] | None = None
         if require_production_config:
             validate_production_configuration()
             try:
                 store.healthcheck()
+                store.cleanup_expired()
             except PersistenceError as exc:
                 raise RuntimeError("Canonical Supabase persistence is unavailable.") from exc
-        yield
-        if admission_store is not None:
-            admission_store.close()
-        await store.shutdown()
+            interval = _positive_float_setting(
+                "WIKIGRAPH_RETENTION_INTERVAL_SECONDS",
+                RETENTION_CLEANUP_INTERVAL_SECONDS,
+            )
+
+            async def retention_loop() -> None:
+                while True:
+                    await asyncio.sleep(interval)
+                    try:
+                        await asyncio.to_thread(store.cleanup_expired)
+                    except PersistenceError:
+                        logger.exception("Supabase retention cleanup failed")
+
+            retention_task = asyncio.create_task(retention_loop())
+        try:
+            yield
+        finally:
+            if retention_task is not None:
+                retention_task.cancel()
+                await asyncio.gather(retention_task, return_exceptions=True)
+            if admission_store is not None:
+                admission_store.close()
+            await store.shutdown()
         # The module-level governor is shared by the default app and clients;
         # closing it here would leave later app instances with a worker tied to
         # an already-closed event loop. Injected governors remain app-owned.

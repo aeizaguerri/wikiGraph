@@ -32,8 +32,9 @@ def test_real_atomic_per_ip_admission() -> None:
         "p_per_ip_per_day": 2,
         "p_max_ip_keys": 10000,
     }
+    headers = {"apikey": KEY, "Authorization": f"Bearer {KEY}"}
     with httpx.Client() as client:
-        first = client.post(f"{URL}/rpc/admit_crawl_launch", json=limits)
-        second = client.post(f"{URL}/rpc/admit_crawl_launch", json=limits)
+        first = client.post(f"{URL}/rpc/admit_crawl_launch", headers=headers, json=limits)
+        second = client.post(f"{URL}/rpc/admit_crawl_launch", headers=headers, json=limits)
     assert first.json()[0]["admitted"]
     assert second.json()[0]["code"] == "launch_rate_limited"
