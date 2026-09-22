@@ -103,6 +103,7 @@ class Crawler:
             governor=self._governor,
             owner=self._owner,
             cache=self._cache,
+            clock=self._governor.clock,
         )
         try:
             return await self._crawl(client)

@@ -3,12 +3,21 @@
 from __future__ import annotations
 
 import os
+import random
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
+from email.utils import parsedate_to_datetime
 from typing import Any
 
 import httpx
 
-from wikigraph.governor import DEFAULT_GOVERNOR, GlobalWikimediaGovernor
+from wikigraph.governor import (
+    Clock,
+    DEFAULT_GOVERNOR,
+    GlobalWikimediaGovernor,
+    SystemClock,
+)
 from wikigraph.response_cache import (
     InMemoryResponseCache,
     ResponseCache,
@@ -50,6 +59,15 @@ class MediaWikiError(RuntimeError):
     pass
 
 
+class UpstreamOverload(MediaWikiError):
+    """The provider asked us to stop and the run may safely be resumed."""
+
+    def __init__(self, message: str, *, attempts: int, retry_after: float) -> None:
+        super().__init__(message)
+        self.attempts = attempts
+        self.retry_after = retry_after
+
+
 class MediaWikiClient:
     """Talks to `{language}.wikipedia.org/w/api.php` over HTTP."""
 
@@ -61,11 +79,19 @@ class MediaWikiClient:
         governor: GlobalWikimediaGovernor = DEFAULT_GOVERNOR,
         owner: str = "launch-validation",
         cache: ResponseCache | None = None,
+        clock: Clock | None = None,
+        jitter: Callable[[float], float] | None = None,
+        wall_clock: Callable[[], float] = time.time,
     ) -> None:
         self._language = language
         self._governor = governor
         self._owner = owner
         self._cache = cache if cache is not None else InMemoryResponseCache()
+        self._cache = cache if cache is not None else InMemoryResponseCache()
+        self._clock = clock or SystemClock()
+        self._jitter = jitter or (lambda value: value * random.uniform(0.5, 1.5))
+        self._wall_clock = wall_clock
+        self._last_request_had_overload = False
         self._http = httpx.AsyncClient(
             base_url=f"https://{language}.wikipedia.org",
             headers={"User-Agent": configured_user_agent()},
@@ -173,20 +199,67 @@ class MediaWikiClient:
         return ResolvedTitle(page["title"], page.get("ns", 0), "missing" in page)
 
     async def _get(self, params: dict[str, str]) -> dict[str, Any]:
-        response = await self._governor.request(
-            self._owner, lambda: self._http.get("/w/api.php", params=params)
-        )
-        if response.status_code != 200:
-            raise MediaWikiError(
-                f"MediaWiki API returned HTTP {response.status_code}"
+        self._last_request_had_overload = False
+        for attempt in range(1, 11):
+            response = await self._governor.request(
+                self._owner, lambda: self._http.get("/w/api.php", params=params)
             )
-        body: dict[str, Any] = response.json()
-        if "error" in body:
-            error = body["error"]
-            raise MediaWikiError(
-                f"MediaWiki API error: {error.get('code', 'unknown')}"
-            )
-        return body
+            overload = response.status_code in {429, 503}
+            try:
+                body: dict[str, Any] = response.json()
+            except ValueError:
+                body = {}
+            error = body.get("error")
+            if (
+                isinstance(error, dict)
+                and str(error.get("code", "")).lower() == "maxlag"
+            ):
+                overload = True
+            if not overload:
+                if response.status_code != 200:
+                    raise MediaWikiError(
+                        f"MediaWiki API returned HTTP {response.status_code}"
+                    )
+                if "error" in body:
+                    code = (
+                        error.get("code", "unknown")
+                        if isinstance(error, dict)
+                        else "unknown"
+                    )
+                    raise MediaWikiError(f"MediaWiki API error: {code}")
+                return body
+
+            self._last_request_had_overload = True
+            delay = self._retry_delay(response, error, attempt)
+            await self._governor.record_overload(delay)
+            if attempt == 10:
+                raise UpstreamOverload(
+                    "Wikimedia is still applying flow control after ten attempts.",
+                    attempts=attempt,
+                    retry_after=delay,
+                )
+            await self._clock.sleep(delay)
+        raise AssertionError("overload retry loop did not terminate")
+
+    def _retry_delay(
+        self, response: httpx.Response, error: Any, attempt: int
+    ) -> float:
+        supplied = response.headers.get("Retry-After")
+        if supplied is None and isinstance(error, dict):
+            lag = error.get("lag")
+            if isinstance(lag, (int, float)):
+                supplied = str(lag)
+        if supplied is not None:
+            try:
+                return min(45.0, max(0.0, float(supplied)))
+            except ValueError:
+                try:
+                    retry_at = parsedate_to_datetime(supplied).timestamp()
+                except (TypeError, ValueError, OverflowError):
+                    pass
+                else:
+                    return min(45.0, max(0.0, retry_at - self._wall_clock()))
+        return min(45.0, max(0.0, self._jitter(float(2 ** (attempt - 1)))))
 
     async def _cached_get(
         self, params: dict[str, str], key: ResponseCacheKey
@@ -195,7 +268,8 @@ class MediaWikiClient:
         if cached is not None:
             return cached
         body = await self._get(params)
-        self._cache.put(key, body)
+        if not self._last_request_had_overload:
+            self._cache.put(key, body)
         return body
 
     async def aclose(self) -> None:

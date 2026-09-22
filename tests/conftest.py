@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import socket
 import threading
 from collections.abc import AsyncIterator, Callable
@@ -16,6 +17,20 @@ from wikigraph.app import STATIC_DIR, create_app
 
 VIEW_ENTRY = STATIC_DIR / "index.html"
 BOOT_TIMEOUT = 10_000
+
+
+@pytest.fixture(autouse=True)
+def isolate_real_upstream_cache() -> None:
+    """Keep real integration tests independent while exercising shared cache wiring."""
+    url = os.environ.get("WIKIGRAPH_TICKET24_POSTGREST_URL")
+    key = os.environ.get("WIKIGRAPH_TICKET24_POSTGREST_KEY")
+    if url and key:
+        response = httpx.delete(
+            f"{url}/upstream_response_cache",
+            headers={"apikey": key, "Authorization": f"Bearer {key}"},
+            timeout=10.0,
+        )
+        response.raise_for_status()
 
 
 @pytest.fixture
