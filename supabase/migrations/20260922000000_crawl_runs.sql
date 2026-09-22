@@ -193,3 +193,11 @@ $$;
 
 revoke all on function public.admit_crawl_launch(text, integer, integer, integer, integer)
 from public, anon;
+do $$
+begin
+  if exists (select 1 from pg_roles where rolname = 'service_role') then
+    grant execute on function public.admit_crawl_launch(text, integer, integer, integer, integer)
+      to service_role;
+  end if;
+end;
+$$;
