@@ -369,6 +369,12 @@ def create_app(
                     "run_recoverable",
                     run.error or "The crawl run can be resumed.",
                 )
+            if run.status is RunStatus.EXPIRED:
+                raise _error(
+                    410,
+                    "run_expired",
+                    "This crawl run has expired and its detailed state was removed.",
+                )
             raise _error(
                 409, "run_failed", run.error or "The crawl run failed."
             )

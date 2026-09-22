@@ -6,6 +6,7 @@ import asyncio
 import os
 import secrets
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Callable, Protocol
 
@@ -36,6 +37,7 @@ class RunStatus(str, Enum):
     RECOVERABLE = "recoverable"
     COMPLETED = "completed"
     FAILED = "failed"
+    EXPIRED = "expired"
 
 
 PROGRESS_EVENT = "progress"
@@ -43,11 +45,13 @@ COMPLETED_EVENT = "completed"
 FAILED_EVENT = "failed"
 RECOVERABLE_EVENT = "recoverable"
 OVERLOAD_WAITING_EVENT = "overload_waiting"
+EXPIRED_EVENT = "expired"
 TERMINAL_EVENT_TYPES = {
     COMPLETED_EVENT,
     FAILED_EVENT,
     RECOVERABLE_EVENT,
     OVERLOAD_WAITING_EVENT,
+    EXPIRED_EVENT,
 }
 
 
@@ -509,6 +513,31 @@ class SupabaseCrawlRunStore:
         self._runs[run_id] = run
         return run
 
+    def cleanup_expired(self, now: datetime | None = None) -> int:
+        """Remove detailed state through the database-authorized cleanup RPC."""
+        cleanup_now = now or datetime.now(timezone.utc)
+        endpoint = (
+            f"{self._url}/{self._rest_path}/rpc/expire_crawl_runs"
+            if self._rest_path
+            else f"{self._url}/rpc/expire_crawl_runs"
+        )
+        try:
+            response = self._client.post(
+                endpoint,
+                headers=self._headers(),
+                json={"p_now": cleanup_now.isoformat()},
+            )
+            response.raise_for_status()
+            body = response.json()
+        except (httpx.HTTPError, OSError, ValueError) as exc:
+            raise PersistenceError("Supabase retention cleanup failed.") from exc
+        if not isinstance(body, list) or not body or not isinstance(body[0], dict):
+            raise PersistenceError("Supabase returned an invalid retention result.")
+        try:
+            return int(body[0]["expired_count"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise PersistenceError("Supabase returned an invalid retention count.") from exc
+
     def retry_run(
         self, run_id: str, transport: httpx.AsyncBaseTransport | None
     ) -> CrawlRun:
@@ -744,5 +773,7 @@ def _hydrate_run(run: CrawlRun, row: dict[str, Any]) -> None:
                 },
             )
         )
+    elif status is RunStatus.EXPIRED:
+        run.publish(RunEvent(EXPIRED_EVENT, {"error": "This crawl run has expired."}))
     if status is not RunStatus.RUNNING:
         run._done.set()
