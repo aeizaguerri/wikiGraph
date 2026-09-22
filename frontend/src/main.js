@@ -20,6 +20,11 @@ const lensLevel = document.getElementById("lens-level");
 const legendTitle = document.getElementById("legend-title");
 const legendEntries = document.getElementById("legend-entries");
 const launchForm = document.getElementById("launch-form");
+const waitingBox = document.getElementById("run-waiting");
+const runState = document.getElementById("run-state");
+const runProgress = document.getElementById("run-progress");
+const runRecent = document.getElementById("run-recent");
+const retryButton = document.getElementById("run-retry");
 
 const PHYSICS_LABELS = {
   settling: "settling…",
@@ -53,6 +58,44 @@ function syncUrl({ lens = null, run = null }) {
   if (lens) url.searchParams.set("color", lens);
   if (run) url.searchParams.set("run", run);
   window.history.replaceState(null, "", url);
+}
+
+const LIFECYCLE_LABELS = {
+  running: "Building your Graph — safe to leave this tab.",
+  overload_waiting: "Wikimedia is busy; this run is waiting and will keep its identity.",
+  recoverable: "The run was interrupted. Resume it from the last checkpoint.",
+  failed: "This run failed and did not produce a completed Graph.",
+  expired: "This run has expired; its Graph is no longer available.",
+  completed: "Requested Graph ready.",
+};
+
+function renderRunState(data) {
+  waitingBox.hidden = data.status === "completed";
+  runState.textContent = LIFECYCLE_LABELS[data.status] ?? `Run status: ${data.status}`;
+  runProgress.textContent = `Crawled ${data.crawled} · Discovered ${data.discovered} · Depth ${data.currentDepth}`;
+  runRecent.textContent = data.recent?.length ? `Recent: ${data.recent.join(" · ")}` : "Waiting for the first committed batch…";
+  retryButton.hidden = !["recoverable", "overload_waiting"].includes(data.status);
+  retryButton.dataset.runId = data.runId;
+  retryButton.disabled = data.status === "overload_waiting";
+  statusBox.textContent = data.status === "completed" ? "" : "live run";
+}
+
+async function refreshRun(runId) {
+  const response = await fetch(`/api/runs/${runId}`);
+  if (!response.ok) {
+    const message = await errorMessage(response);
+    if (response.status === 410) {
+      renderRunState({ runId, status: "expired", crawled: 0, discovered: 0, currentDepth: 0, recent: [] });
+    }
+    throw new Error(message);
+  }
+  const state = await response.json();
+  renderRunState(state);
+  if (state.status === "running" || state.status === "overload_waiting" || state.status === "recoverable") {
+    const preview = await fetch(`/api/runs/${runId}/preview`);
+    if (preview.ok) mountExperience(await preview.json());
+  }
+  return state;
 }
 
 // The in-view chrome is rebuilt from the live experience after every mount,
@@ -134,15 +177,31 @@ for (const [button, lens] of [
 
 // Launch wiring (ticket 11): the launcher owns the form; this module owns the
 // network flow — POST create run → SSE subscription → final Graph swap.
+let activeSource = null;
 function watchRun(runId) {
+  activeSource?.close();
   const source = new EventSource(`/api/runs/${runId}/events`);
+  activeSource = source;
   const stop = () => source.close();
   source.addEventListener("progress", (event) => {
-    launcher.updateProgress(JSON.parse(event.data));
+    const progress = JSON.parse(event.data);
+    launcher.updateProgress(progress);
+    renderRunState({ runId, status: "running", ...progress, currentDepth: progress.depth });
+    fetch(`/api/runs/${runId}/preview`).then((response) => response.ok ? response.json() : null).then((preview) => preview && mountExperience(preview));
   });
+  for (const eventName of ["overload_waiting", "recoverable", "expired"]) {
+    source.addEventListener(eventName, (event) => {
+      stop();
+      const data = JSON.parse(event.data);
+      renderRunState({ runId, status: eventName, crawled: 0, discovered: 0, currentDepth: 0, recent: [] });
+      if (eventName === "recoverable" || eventName === "overload_waiting") launcher.fail(data.error);
+      else launcher.fail(data.error ?? "This run has expired.");
+    });
+  }
   source.addEventListener("failed", (event) => {
     stop();
     launcher.fail(JSON.parse(event.data).error);
+    renderRunState({ runId, status: "failed", crawled: 0, discovered: 0, currentDepth: 0, recent: [] });
   });
   source.addEventListener("completed", async () => {
     stop();
@@ -153,8 +212,10 @@ function watchRun(runId) {
     }
     launcher.complete();
     mountExperience(await response.json());
+    renderRunState({ runId, status: "completed", crawled: 0, discovered: 0, currentDepth: 0, recent: [] });
     syncUrl({ run: runId });
   });
+  source.onerror = () => { refreshRun(runId).catch(() => {}); };
 }
 
 const launcher = createLauncher(launchForm, async (values) => {
@@ -170,6 +231,9 @@ const launcher = createLauncher(launchForm, async (values) => {
   });
   if (!response.ok) return { error: await errorMessage(response) };
   const { runId } = await response.json();
+  syncUrl({ run: runId });
+  renderRunState({ runId, status: "running", crawled: 0, discovered: 1, currentDepth: 0, recent: [] });
+  refreshRun(runId).catch((error) => showNotice(error.message));
   watchRun(runId);
   return {};
 });
@@ -178,13 +242,28 @@ document.getElementById("launch-chip").addEventListener("click", () => {
   launcher.open();
 });
 
-if (bootRunId) {
-  const response = await fetch(`/api/runs/${bootRunId}/graph`);
+retryButton.addEventListener("click", async () => {
+  const runId = retryButton.dataset.runId;
+  if (!runId) return;
+  const response = await fetch(`/api/runs/${runId}/retry`, { method: "POST" });
   if (!response.ok) {
+    renderRunState({ runId, status: "failed", crawled: 0, discovered: 0, currentDepth: 0, recent: [] });
     showNotice(await errorMessage(response));
-  } else {
-    mountExperience(await response.json());
+    return;
   }
+  renderRunState({ runId, status: "running", crawled: 0, discovered: 0, currentDepth: 0, recent: [] });
+  watchRun(runId);
+});
+
+if (bootRunId) {
+  try {
+    const state = await refreshRun(bootRunId);
+    if (state.status === "completed") {
+      const response = await fetch(`/api/runs/${bootRunId}/graph`);
+      if (response.ok) mountExperience(await response.json());
+    } else if (state.status !== "expired" && state.status !== "failed") watchRun(bootRunId);
+    if (state.status === "failed" || state.status === "expired") showNotice(state.error ?? LIFECYCLE_LABELS[state.status]);
+  } catch (error) { showNotice(error.message); }
 } else {
   showNotice("No Graph in view yet. Launch a crawl run and it will draw itself here.");
 }

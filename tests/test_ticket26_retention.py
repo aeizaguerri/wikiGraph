@@ -118,15 +118,15 @@ async def test_cleanup_preserves_tombstones_metrics_and_independent_cache() -> N
                 retained = await client.get(f"/api/runs/{completed_id}/graph")
                 assert retained.status_code == 200
                 current[0] = now
-                expired = await client.get(f"/api/runs/{completed_id}/graph")
-                assert expired.status_code == 410
-                assert (
-                    await client.get(f"/api/runs/{completed_id}/graph")
-                ).status_code == 410
+                for path in ("", "/preview", "/graph"):
+                    expired = await client.get(f"/api/runs/{completed_id}{path}")
+                    assert expired.status_code == 410
+                    assert expired.json()["error"]["code"] == "run_expired"
                 current[0] = now + timedelta(days=1)
-                assert (
-                    await client.get(f"/api/runs/{incomplete_id}/graph")
-                ).status_code == 410
+                for path in ("", "/preview", "/graph"):
+                    expired = await client.get(f"/api/runs/{incomplete_id}{path}")
+                    assert expired.status_code == 410
+                    assert expired.json()["error"]["code"] == "run_expired"
 
         completed = database.get(
             f"{POSTGREST_URL}/crawl_runs",

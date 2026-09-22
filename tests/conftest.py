@@ -14,6 +14,7 @@ import uvicorn
 from tests.helpers import collect_events, create_run
 from tests.stub import FakeMediaWiki
 from wikigraph.app import STATIC_DIR, create_app
+from wikigraph.runs import InMemoryCrawlRunStore
 
 VIEW_ENTRY = STATIC_DIR / "index.html"
 BOOT_TIMEOUT = 10_000
@@ -84,14 +85,14 @@ def free_port() -> int:
 
 @pytest.fixture
 async def view_server(
-    stub: FakeMediaWiki, free_port: int
+    stub: FakeMediaWiki, free_port: int, view_store: InMemoryCrawlRunStore
 ) -> AsyncIterator[httpx.AsyncClient]:
     """The real FastAPI app on a real port, MediaWiki transport stubbed."""
     if not VIEW_ENTRY.is_file():
         pytest.skip("view not built: run `npm run build` in frontend/")
     server = uvicorn.Server(
         uvicorn.Config(
-            create_app(mediawiki_transport=stub.transport),
+            create_app(mediawiki_transport=stub.transport, run_store=view_store),
             host="127.0.0.1",
             port=free_port,
             log_level="error",
@@ -111,6 +112,11 @@ async def view_server(
     finally:
         server.should_exit = True
         thread.join(timeout=5)
+
+
+@pytest.fixture
+def view_store() -> InMemoryCrawlRunStore:
+    return InMemoryCrawlRunStore()
 
 
 @pytest.fixture

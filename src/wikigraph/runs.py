@@ -98,6 +98,9 @@ class CrawlRun:
         self._persist_recovery = persist_recovery
         self._checkpoint = checkpoint
         self.retry_state: dict[str, Any] | None = None
+        self.progress: dict[str, Any] = {
+            "crawled": 0, "discovered": 1, "depth": 0, "recent": []
+        }
 
     def subscribe(self) -> asyncio.Queue[RunEvent]:
         queue: asyncio.Queue[RunEvent] = asyncio.Queue()
@@ -178,6 +181,7 @@ class CrawlRun:
             self._done.set()
 
     async def _record_progress(self, progress: Progress) -> None:
+        self.progress = _progress_json(progress)
         if self._persist_progress is not None:
             self._persist_progress(progress)
         self.publish(
@@ -207,6 +211,8 @@ class CrawlRunHandle(Protocol):
     error: str | None
     result: CrawlResult | None
     communities: CommunityAssignment | None
+    progress: dict[str, Any]
+    retry_state: dict[str, Any] | None
 
     def subscribe(self) -> asyncio.Queue[RunEvent]: ...
 
@@ -744,6 +750,7 @@ def _hydrate_run(run: CrawlRun, row: dict[str, Any]) -> None:
     run.retry_state = retry_state if isinstance(retry_state, dict) else None
     progress = row.get("progress")
     if isinstance(progress, dict):
+        run.progress = progress
         run.publish(RunEvent(PROGRESS_EVENT, progress))
     graph = row.get("graph")
     if isinstance(graph, dict) and status is RunStatus.COMPLETED:
