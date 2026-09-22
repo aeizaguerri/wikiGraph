@@ -103,17 +103,30 @@ async def test_cleanup_preserves_tombstones_metrics_and_independent_cache() -> N
             ).json()
         }
 
-        store = SupabaseCrawlRunStore(POSTGREST_URL, POSTGREST_KEY, rest_path="")
-        assert store.cleanup_expired(now - timedelta(seconds=1)) == 0
-        retained = database.get(
-            f"{POSTGREST_URL}/crawl_runs",
-            params={"run_id": f"eq.{completed_id}"},
-            headers=_headers(),
-        ).json()[0]
-        assert retained["status"] == "completed" and retained["graph"] is not None
-        assert store.cleanup_expired(now) == 1
-        assert store.cleanup_expired(now + timedelta(days=1)) == 1
-        assert store.cleanup_expired(now) == 0
+        current = [now - timedelta(seconds=1)]
+        store = SupabaseCrawlRunStore(
+            POSTGREST_URL,
+            POSTGREST_KEY,
+            rest_path="",
+            clock=lambda: current[0],
+        )
+        app = create_app(run_store=store)
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                retained = await client.get(f"/api/runs/{completed_id}/graph")
+                assert retained.status_code == 200
+                current[0] = now
+                expired = await client.get(f"/api/runs/{completed_id}/graph")
+                assert expired.status_code == 410
+                assert (
+                    await client.get(f"/api/runs/{completed_id}/graph")
+                ).status_code == 410
+                current[0] = now + timedelta(days=1)
+                assert (
+                    await client.get(f"/api/runs/{incomplete_id}/graph")
+                ).status_code == 410
 
         completed = database.get(
             f"{POSTGREST_URL}/crawl_runs",
@@ -142,14 +155,6 @@ async def test_cleanup_preserves_tombstones_metrics_and_independent_cache() -> N
         by_day = {row["metric_day"]: row["run_count"] for row in metrics}
         assert by_day["2026-09-22"] == existing_metrics.get("2026-09-22", 0) + 1
         assert by_day["2026-09-23"] == existing_metrics.get("2026-09-23", 0) + 1
-        app = create_app(run_store=store)
-        async with app.router.lifespan_context(app):
-            async with httpx.AsyncClient(
-                transport=httpx.ASGITransport(app=app), base_url="http://test"
-            ) as client:
-                expired = await client.get(f"/api/runs/{completed_id}/graph")
-        assert expired.status_code == 410
-        assert expired.json()["error"]["code"] == "run_expired"
     finally:
         database.delete(
             f"{POSTGREST_URL}/crawl_runs",

@@ -397,6 +397,7 @@ class SupabaseCrawlRunStore:
         rest_path: str = "/rest/v1",
         governor: GlobalWikimediaGovernor = DEFAULT_GOVERNOR,
         cache: ResponseCache | None = None,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._url = (url or os.environ.get("SUPABASE_URL", "")).rstrip("/")
         self._key = key or os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
@@ -406,6 +407,7 @@ class SupabaseCrawlRunStore:
         self._client = client or httpx.Client(timeout=20.0)
         self._owns_client = client is None
         self._governor = governor
+        self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._cache = (
             cache
             if cache is not None
@@ -485,16 +487,28 @@ class SupabaseCrawlRunStore:
 
     def get(self, run_id: str) -> CrawlRun | None:
         active = self._runs.get(run_id)
-        if active is not None:
-            return active
         records = self._request(
             "GET",
             headers=self._headers(),
             params={"run_id": f"eq.{run_id}", "limit": "1"},
         )
         if not records:
-            return None
+            return active
         row = records[0]
+        # Older test doubles and pre-retention schemas do not expose expiry;
+        # canonical migrated rows do, so only those reads invoke cleanup.
+        if "expires_at" in row:
+            self.cleanup_expired()
+            records = self._request(
+                "GET",
+                headers=self._headers(),
+                params={"run_id": f"eq.{run_id}", "limit": "1"},
+            )
+            if not records:
+                return None
+            row = records[0]
+        if active is not None and row.get("status") != RunStatus.EXPIRED.value:
+            return active
         request = CrawlRequest(
             seed=str(row["seed"]),
             language=str(row["language"]),
@@ -515,7 +529,7 @@ class SupabaseCrawlRunStore:
 
     def cleanup_expired(self, now: datetime | None = None) -> int:
         """Remove detailed state through the database-authorized cleanup RPC."""
-        cleanup_now = now or datetime.now(timezone.utc)
+        cleanup_now = now or self._clock()
         endpoint = (
             f"{self._url}/{self._rest_path}/rpc/expire_crawl_runs"
             if self._rest_path
