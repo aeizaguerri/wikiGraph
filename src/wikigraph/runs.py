@@ -36,6 +36,7 @@ class RunStatus(str, Enum):
     RECOVERABLE = "recoverable"
     COMPLETED = "completed"
     FAILED = "failed"
+    EXPIRED = "expired"
 
 
 PROGRESS_EVENT = "progress"
@@ -43,11 +44,13 @@ COMPLETED_EVENT = "completed"
 FAILED_EVENT = "failed"
 RECOVERABLE_EVENT = "recoverable"
 OVERLOAD_WAITING_EVENT = "overload_waiting"
+EXPIRED_EVENT = "expired"
 TERMINAL_EVENT_TYPES = {
     COMPLETED_EVENT,
     FAILED_EVENT,
     RECOVERABLE_EVENT,
     OVERLOAD_WAITING_EVENT,
+    EXPIRED_EVENT,
 }
 
 
@@ -94,6 +97,9 @@ class CrawlRun:
         self._persist_recovery = persist_recovery
         self._checkpoint = checkpoint
         self.retry_state: dict[str, Any] | None = None
+        self.progress: dict[str, Any] = {
+            "crawled": 0, "discovered": 1, "depth": 0, "recent": []
+        }
 
     def subscribe(self) -> asyncio.Queue[RunEvent]:
         queue: asyncio.Queue[RunEvent] = asyncio.Queue()
@@ -174,6 +180,7 @@ class CrawlRun:
             self._done.set()
 
     async def _record_progress(self, progress: Progress) -> None:
+        self.progress = _progress_json(progress)
         if self._persist_progress is not None:
             self._persist_progress(progress)
         self.publish(
@@ -203,6 +210,8 @@ class CrawlRunHandle(Protocol):
     error: str | None
     result: CrawlResult | None
     communities: CommunityAssignment | None
+    progress: dict[str, Any]
+    retry_state: dict[str, Any] | None
 
     def subscribe(self) -> asyncio.Queue[RunEvent]: ...
 
@@ -701,6 +710,7 @@ def _hydrate_run(run: CrawlRun, row: dict[str, Any]) -> None:
     run.retry_state = retry_state if isinstance(retry_state, dict) else None
     progress = row.get("progress")
     if isinstance(progress, dict):
+        run.progress = progress
         run.publish(RunEvent(PROGRESS_EVENT, progress))
     graph = row.get("graph")
     if isinstance(graph, dict) and status is RunStatus.COMPLETED:
@@ -744,5 +754,7 @@ def _hydrate_run(run: CrawlRun, row: dict[str, Any]) -> None:
                 },
             )
         )
+    elif status is RunStatus.EXPIRED:
+        run.publish(RunEvent(EXPIRED_EVENT, {"error": run.error or "This crawl run has expired."}))
     if status is not RunStatus.RUNNING:
         run._done.set()

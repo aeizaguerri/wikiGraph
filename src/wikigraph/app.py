@@ -87,6 +87,25 @@ class GraphOut(CamelModel):
     modularity: float
 
 
+class RunStateOut(CamelModel):
+    run_id: str
+    seed: str
+    language: str
+    depth: int
+    node_cap: int
+    status: str
+    crawled: int
+    discovered: int
+    current_depth: int
+    recent: list[str]
+    error: str | None = None
+    retry_after: float | None = None
+
+
+class PreviewOut(GraphOut):
+    complete: bool
+
+
 def _error(status: int, code: str, message: str) -> HTTPException:
     return HTTPException(
         status_code=status, detail={"error": {"code": code, "message": message}}
@@ -240,7 +259,11 @@ def create_app(
         if admission_store is not None:
             admission_store.close()
         await store.shutdown()
-        await governor.shutdown()
+        # The module-level governor is shared by the default app and clients;
+        # closing it here would leave later app instances with a worker tied to
+        # an already-closed event loop. Injected governors remain app-owned.
+        if governor is not DEFAULT_GOVERNOR:
+            await governor.shutdown()
 
     app = FastAPI(title="wikiGraph", lifespan=lifespan)
 
@@ -348,6 +371,53 @@ def create_app(
             headers={"Cache-Control": "no-cache"},
         )
 
+    @app.get("/api/runs/{run_id}", response_model=RunStateOut)
+    async def run_state(run_id: str) -> RunStateOut:
+        run = _require_run(store, run_id)
+        progress = run.progress
+        retry_after = None
+        if run.retry_state is not None:
+            value = run.retry_state.get("retry_after")
+            retry_after = float(value) if isinstance(value, (int, float)) else None
+        return RunStateOut(
+            run_id=run.id,
+            seed=run.request.seed,
+            language=run.request.language,
+            depth=run.request.depth,
+            node_cap=run.request.node_cap,
+            status=run.status.value,
+            crawled=int(progress.get("crawled", 0)),
+            discovered=int(progress.get("discovered", 1)),
+            current_depth=int(progress.get("depth", 0)),
+            recent=[str(item) for item in progress.get("recent", [])],
+            error=run.error,
+            retry_after=retry_after,
+        )
+
+    @app.get("/api/runs/{run_id}/preview", response_model=PreviewOut)
+    async def run_preview(run_id: str) -> PreviewOut:
+        run = _require_run(store, run_id)
+        if run.result is not None and run.communities is not None:
+            graph = _graph_out(run, complete=True)
+            return PreviewOut(**graph.model_dump(), complete=True)
+        checkpoint = getattr(run, "_checkpoint", None)
+        if checkpoint is None:
+            raise _error(409, "preview_unavailable", "No committed preview is available yet.")
+        return PreviewOut(
+            run_id=run.id,
+            seed=run.request.seed,
+            language=run.request.language,
+            depth=run.request.depth,
+            truncated=checkpoint.truncated,
+            nodes=[GraphNodeOut(title=node.title, level=node.level, is_seed=node.is_seed, community_id=0) for node in checkpoint.nodes],
+            edges=[GraphEdgeOut(source=edge.source, target=edge.target) for edge in checkpoint.edges],
+            crawled=checkpoint.crawled,
+            discovered=len(checkpoint.nodes),
+            community_count=1,
+            modularity=0.0,
+            complete=False,
+        )
+
     @app.get("/api/runs/{run_id}/graph")
     async def run_graph(run_id: str) -> GraphOut:
         run = _require_run(store, run_id)
@@ -369,9 +439,16 @@ def create_app(
                     "run_recoverable",
                     run.error or "The crawl run can be resumed.",
                 )
+            if run.status is RunStatus.EXPIRED:
+                raise _error(410, "run_expired", run.error or "This crawl run has expired.")
             raise _error(
                 409, "run_failed", run.error or "The crawl run failed."
             )
+        return _graph_out(run, complete=True)
+
+    def _graph_out(run: CrawlRunHandle, *, complete: bool) -> GraphOut | PreviewOut:
+        assert run.result is not None
+        assert run.communities is not None
         result = run.result
         communities = run.communities
         return GraphOut(

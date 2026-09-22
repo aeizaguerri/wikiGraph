@@ -32,6 +32,12 @@
         Node cap reached. This Graph is partial.
       </p>
       <p id="notice" class="notice"></p>
+      <section id="run-waiting" class="run-waiting" hidden aria-live="polite">
+        <p id="run-state" class="run-state"></p>
+        <p id="run-progress" class="run-progress"></p>
+        <p id="run-recent" class="run-recent"></p>
+        <button id="run-retry" type="button" hidden>Resume this run</button>
+      </section>
       <button id="launch-chip" class="launch-chip" type="button" aria-haspopup="dialog">+ grafo</button>
       <div id="launch-overlay" class="overlay" hidden>
         <form id="launch-form" class="overlay-form" aria-label="Launch a new crawl run">

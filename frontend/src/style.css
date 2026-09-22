@@ -388,3 +388,22 @@ body {
 .overlay[data-mode="inline"] .overlay-error {
   grid-column: 1 / -1;
 }
+.run-waiting {
+  position: fixed;
+  z-index: 4;
+  top: 18px;
+  left: 18px;
+  max-width: min(420px, calc(100vw - 36px));
+  padding: 14px 16px;
+  border: 1px solid #52627b;
+  border-radius: 10px;
+  background: #111827e8;
+  color: #e8edf5;
+  box-shadow: 0 8px 26px #0006;
+}
+.run-waiting p { margin: 0 0 6px; }
+.run-state { font-weight: 700; }
+.run-progress { color: #9de2ca; }
+.run-recent { color: #9aa8bd; font-size: 12px; }
+#run-retry { border: 1px solid #9de2ca; border-radius: 999px; background: transparent; color: #9de2ca; padding: 6px 12px; }
+#run-retry:disabled { cursor: wait; opacity: .65; }
