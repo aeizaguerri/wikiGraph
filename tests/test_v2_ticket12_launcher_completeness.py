@@ -17,6 +17,9 @@ async def test_variant_c_controls_are_keyboard_reachable(
     assert await browser_page.evaluate("() => document.activeElement.dataset.depth") == "1"
     await browser_page.keyboard.press("Enter")
     assert await browser_page.get_attribute("#launch-depth [data-depth='1']", "aria-pressed") == "true"
+    await browser_page.click("[data-language='en']")
+    assert await browser_page.get_attribute("[data-language='en']", "aria-pressed") == "true"
+    assert await browser_page.get_attribute("[data-language='es']", "aria-pressed") == "false"
     await browser_page.focus("#launch-seed")
     await browser_page.fill("#launch-seed", "Keyboard")
     await browser_page.keyboard.press("Enter")
