@@ -18,6 +18,7 @@ from wikigraph.governor import (
     GlobalWikimediaGovernor,
     SystemClock,
 )
+from wikigraph.observability import emit
 from wikigraph.response_cache import (
     InMemoryResponseCache,
     ResponseCache,
@@ -214,6 +215,19 @@ class MediaWikiClient:
                 and str(error.get("code", "")).lower() == "maxlag"
             ):
                 overload = True
+            delay = None
+            if overload:
+                delay = self._retry_delay(response, error, attempt)
+            emit(
+                "wikimedia_attempt",
+                owner=self._owner,
+                edition=self._language,
+                attempt=attempt,
+                continuation=bool(params.get("plcontinue")),
+                status_code=response.status_code,
+                overload=overload,
+                retry_delay_seconds=delay,
+            )
             if not overload:
                 if response.status_code != 200:
                     raise MediaWikiError(
@@ -229,7 +243,7 @@ class MediaWikiClient:
                 return body
 
             self._last_request_had_overload = True
-            delay = self._retry_delay(response, error, attempt)
+            assert delay is not None
             await self._governor.record_overload(delay)
             if attempt == 10:
                 raise UpstreamOverload(
@@ -264,6 +278,14 @@ class MediaWikiClient:
         self, params: dict[str, str], key: ResponseCacheKey
     ) -> dict[str, Any]:
         cached = self._cache.get(key)
+        emit(
+            "upstream_cache_lookup",
+            owner=self._owner,
+            edition=self._language,
+            kind=key.kind,
+            continuation=bool(params.get("plcontinue")),
+            hit=cached is not None,
+        )
         if cached is not None:
             return cached
         body = await self._get(params)

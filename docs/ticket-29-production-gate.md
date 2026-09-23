@@ -29,9 +29,11 @@ report so missing evidence is reviewable.
 | `GET https://wikigraph.onrender.com/readyz` | HTTP 200, `{"status":"ready","persistence":"supabase"}` | deployed public endpoint |
 | `npm --prefix frontend ci && npm --prefix frontend run build` | dependencies installed; Vite build passed (`vite v8.3.0`) | local frontend build |
 | `node --test` from `frontend/` | 0 tests discovered; no Node proxy test suite is configured in this branch | local tooling |
-| `scripts/ticket28-postgrest.sh start` plus all ticket env aliases and `uv run pytest -q` | 126 passed, 0 skipped, 4:21 | local Podman/Postgres/PostgREST harness |
+| `scripts/ticket28-postgrest.sh start` plus all ticket env aliases and `uv run pytest -q` | 128 passed, 0 skipped, 4:21 | local Podman/Postgres/PostgREST harness |
 | `uv run mypy src` | success, 11 source files | local typecheck |
 | `uv run python -m benchmarks.ticket29_production_gate --render-url https://wikigraph.onrender.com` | exit 1, 0 launches, 0 fault injections; all incomplete criteria listed in report | fail-closed collector |
+| `node --test cloudflare/worker.test.js` | 2 passed, 0 skipped | local Cloudflare proxy tests |
+| `uv run pytest -q` after ticket-29 observability changes | 128 passed, 0 skipped, 4:21 | local Podman/Postgres/PostgREST harness |
 
 The local benchmark's `simulated_time` is 654.5 seconds. It is not a wall-clock
 completion measurement. It has no Render CPU, Render memory, cache-hit,
@@ -42,8 +44,8 @@ criterion remains incomplete rather than being promoted to production proof.
 
 | Criterion | State | Evidence origin / remaining proof |
 | --- | --- | --- |
-| Spanish and English deployed runs | **bounded smoke proven; full criterion pending** | Direct Render API launches completed: ES `ROdJ3gu4chYcGvqrKBf2oQ9JIOxG00EY`, EN `T6lmeVzpx_2pkQy8qv7DEK9gc2Ma9NMS`; each depth 1/node cap 20, Graph HTTP 200 with 20 nodes, same-ID state/Graph reopens HTTP 200. This is not the required fresh-browser/SSE acceptance receipt. |
-| Reopen and seven-day retention | **bounded reopen proven; retention pending** | The two run IDs above reopened immediately through the public API; seven-day elapsed/controlled retention evidence is still absent. |
+| Spanish and English deployed runs | **bounded fresh-browser/SSE smoke proven; full criterion pending** | Cloudflare browser launch ES `NKDKCoZB-w8tbAE_5hLy45MCVgjg2vdl` and EN `x2RzjHZVZ0FRKG4swOK3SC6D9oY38s7P`, both depth 1/node cap 20; each received `/events` HTTP 200, reached Ready with 1 crawled/20 discovered, Graph HTTP 200, and same-URL reload reopened Ready. This is not the required 2,500 acceptance run. |
+| Reopen and seven-day retention | **bounded browser reopen proven; retention pending** | The two browser run URLs reopened immediately through Cloudflare; seven-day elapsed/controlled retention evidence is still absent. |
 | Render restart checkpoint recovery | **pending** | Requires an operator-coordinated restart and same-run manual retry receipt. |
 | Representative 2,500-Article benchmark | **incomplete** | Local shape and governor limits are proven; deployed timing/upstream/continuation/cache/retry/fairness/CPU/memory/persistence metrics are absent. |
 | Concurrent global budget and fairness | **local-only** | Deterministic local governor proves 1 in-flight, 2 starts/second, 120 attempts/minute and alternating owners; cross-process deployed evidence is pending. |
@@ -54,8 +56,9 @@ criterion remains incomplete rather than being promoted to production proof.
 
 ## Explicit blockers and rollback posture
 
-The public Render API is reachable for bounded smoke runs, but Render API/CLI
-deployment access and telemetry are unavailable. The precise missing access is:
+The public Render API and read-only Render CLI are reachable for bounded smoke
+runs, but required deployment metrics and restart authority are unavailable. The
+precise missing access is:
 
 1. the deployed Render service revision/runtime identifier and permission to
    inspect its worker logs/metrics;
@@ -64,6 +67,25 @@ deployment access and telemetry are unavailable. The precise missing access is:
    run; and
 3. an operator-controlled Render restart during a run, followed by manual retry
    of the same run ID.
+
+Render CLI verification at `2026-09-23T21:42:10Z` identified service
+`srv-dapg020ae00c73d03pbg`, URL `https://wikigraph.onrender.com`, one Free-plan
+Oregon web instance, and live deployment `dep-dapg02gae00c73d03r8g` at commit
+`76a9aa2286a28912e36840bfbefaeceadaa920b1`. `render logs` returned only
+Uvicorn access records for the smoke window: it contains HTTP paths/statuses but
+no upstream-attempt, continuation, cache-hit, retry-delay, fairness,
+persistence, CPU, or memory measurements. `render services`/`render logs` have
+no metrics command; Render's documented CPU/memory metrics are Dashboard/API
+observability, not exposed by this CLI invocation.
+
+To close that instrumentation gap, this branch adds secret-free structured
+events for Wikimedia attempts, cache lookups, completion timing/process usage,
+and persistence writes in the ticket-29 observability commit below. The
+The deployed service is still the earlier commit above, so this is local code
+evidence only. It requires an explicitly authorized Render deployment of that
+commit (and no deployment was performed here) before a production benchmark can
+consume the new events. Render CPU/memory still requires the service Metrics
+view/API after deployment.
 
 No blind production 2,500-Article load, restart, fault injection, or claim of
 Render CPU/memory was made. A maintainer with those exact permissions must

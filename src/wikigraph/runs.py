@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import secrets
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -30,6 +31,7 @@ from wikigraph.response_cache import (
     SupabaseResponseCache,
 )
 from wikigraph.mediawiki import UpstreamOverload
+from wikigraph.observability import emit, process_usage
 
 
 class RunStatus(str, Enum):
@@ -99,6 +101,8 @@ class CrawlRun:
         self._persist_recovery = persist_recovery
         self._checkpoint = checkpoint
         self.retry_state: dict[str, Any] | None = None
+        self._started_at = time.perf_counter()
+        self._start_usage = process_usage()
         self.progress: dict[str, Any] = {
             "crawled": 0, "discovered": 1, "depth": 0, "recent": []
         }
@@ -143,6 +147,20 @@ class CrawlRun:
             self.status = RunStatus.COMPLETED
             if self._persist_completion is not None:
                 self._persist_completion(self)
+            emit(
+                "crawl_run_complete",
+                run_id=self.id,
+                language=self.request.language,
+                status=self.status.value,
+                duration_seconds=time.perf_counter() - self._started_at,
+                persistence_effect="completion_write",
+                result_nodes=len(result.nodes),
+                result_edges=len(result.edges),
+                crawled=result.crawled,
+                discovered=result.discovered,
+                start_usage=self._start_usage,
+                end_usage=process_usage(),
+            )
             self.publish(RunEvent(COMPLETED_EVENT, {"truncated": result.truncated}))
         except UpstreamOverload as exc:
             self.status = RunStatus.OVERLOAD_WAITING
@@ -541,6 +559,13 @@ class SupabaseCrawlRunStore:
         )
         if not records or records[0].get("run_id") != run_id:
             raise PersistenceError("Supabase did not create the crawl run.")
+        emit(
+            "persistence_write",
+            run_id=run_id,
+            operation="insert",
+            fields=sorted(row),
+            payload_bytes=len(str(row).encode()),
+        )
         run = CrawlRun(
             run_id,
             request,
@@ -725,6 +750,13 @@ class SupabaseCrawlRunStore:
         )
         if not records or records[0].get("run_id") != run_id:
             raise PersistenceError("Supabase did not update the crawl run.")
+        emit(
+            "persistence_write",
+            run_id=run_id,
+            operation="patch",
+            fields=sorted(values),
+            payload_bytes=len(str(values).encode()),
+        )
 
     async def shutdown(self) -> None:
         tasks = [run.task for run in self._runs.values() if run.task is not None]
