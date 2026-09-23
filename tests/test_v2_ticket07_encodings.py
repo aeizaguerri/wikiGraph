@@ -196,6 +196,7 @@ async def test_nodes_paint_their_community_palette_color(
     assert len({node["communityId"] for node in graph["nodes"]}) >= 2
 
     await boot_view(browser_page, view_server, run_id)
+    await wait_static(browser_page)
     samples = await sampled_nodes(browser_page)
 
     assert len(samples) == len(graph["nodes"])
@@ -224,6 +225,7 @@ async def test_communities_beyond_the_twelve_hues_render_neutral_gray(
     assert gray_ids, graph["communityCount"]
 
     await boot_view(browser_page, view_server, run_id)
+    await wait_static(browser_page)
     samples = await sampled_nodes(browser_page)
 
     gray = hex_rgb(NEUTRAL)
@@ -246,6 +248,7 @@ async def test_single_community_run_renders_one_hue_without_error(
     assert graph["communityCount"] == 1
 
     await boot_view(browser_page, view_server, run_id)
+    await wait_static(browser_page)
     samples = await sampled_nodes(browser_page)
 
     assert len(samples) == 1
@@ -265,6 +268,7 @@ async def test_all_isolated_run_renders_singleton_hues_without_error(
     assert graph["communityCount"] == 2
 
     await boot_view(browser_page, view_server, run_id)
+    await wait_static(browser_page)
     samples = await sampled_nodes(browser_page)
 
     assert len(samples) == 2
@@ -296,6 +300,7 @@ async def test_node_size_scales_with_degree_and_hubs_render_larger(
     run_id = await completed_run(stub, view_server, seed="Ana", depth=2)
 
     await boot_view(browser_page, view_server, run_id)
+    await wait_static(browser_page)
     samples = await sampled_nodes(browser_page)
 
     for sample in samples:
