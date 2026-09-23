@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from benchmarks.ticket29_production_gate import (
     CriterionStatus,
+    blocking_criteria,
     build_report,
     classify_local_benchmark,
 )
@@ -52,3 +53,19 @@ def test_live_readiness_does_not_prove_user_journeys() -> None:
     assert report["criteria"]["spanish_and_english_runs"]["status"] == (
         CriterionStatus.PENDING.value
     )
+
+
+def test_gate_rejects_any_incomplete_criterion() -> None:
+    report = build_report(local_benchmark=None, live_probe={})
+
+    assert set(blocking_criteria(report)) == {
+        "spanish_and_english_runs",
+        "reopen_and_retention",
+        "restart_checkpoint_recovery",
+        "representative_2500_benchmark",
+        "global_budget_and_fairness",
+        "overload_recovery",
+        "persistence_failure_fail_closed",
+        "higher_budget_disabled",
+        "cutover_rejects_failed_checks",
+    }

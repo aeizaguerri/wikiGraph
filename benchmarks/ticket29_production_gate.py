@@ -159,6 +159,17 @@ def build_report(
     }
 
 
+def blocking_criteria(report: dict[str, Any]) -> list[str]:
+    """Return criteria that prevent acceptance of the production gate."""
+    criteria = report.get("criteria", {})
+    return [
+        name
+        for name in CRITERIA
+        if not isinstance(criteria.get(name), dict)
+        or criteria[name].get("status") != CriterionStatus.PROVEN.value
+    ]
+
+
 def probe(url: str, timeout: float = 20.0) -> tuple[bool, int | None, str]:
     request = urllib.request.Request(url, headers={"User-Agent": "wikiGraph/ticket29-gate"})
     try:
@@ -191,6 +202,11 @@ def main() -> None:
     )
     json.dump(report, args.output, indent=2, sort_keys=True)
     args.output.write("\n")
+    blocked = blocking_criteria(report)
+    if blocked:
+        raise SystemExit(
+            "ticket 29 gate rejected; incomplete criteria: " + ", ".join(blocked)
+        )
 
 
 if __name__ == "__main__":
