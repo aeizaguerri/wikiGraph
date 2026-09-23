@@ -12,3 +12,20 @@ AGENTS.md
 CONTEXT.md
 skills-lock.json
 supabase/.temp/
+
+# secrets — never commit local credentials
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+credentials.json
+**/credentials*.json
+
+# dependencies / build output
+node_modules/
+dist/
+build/
+.wrangler/
+*.log
