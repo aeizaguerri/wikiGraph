@@ -25,6 +25,18 @@ const runState = document.getElementById("run-state");
 const runProgress = document.getElementById("run-progress");
 const runRecent = document.getElementById("run-recent");
 const retryButton = document.getElementById("run-retry");
+const landingView = document.getElementById("landing-view");
+const runView = document.getElementById("run-view");
+const runTitle = document.getElementById("run-title");
+const runDetail = document.getElementById("run-detail");
+const runCrawled = document.getElementById("run-crawled");
+const runDiscovered = document.getElementById("run-discovered");
+const runPercent = document.getElementById("run-percent");
+const runPhase = document.getElementById("run-phase");
+const runOrbit = document.getElementById("run-orbit");
+const runBadge = document.getElementById("run-badge");
+const runLiveLabel = document.getElementById("run-live-label");
+const runUrl = document.getElementById("run-url");
 
 const PHYSICS_LABELS = {
   settling: "settling…",
@@ -60,6 +72,16 @@ function syncUrl({ lens = null, run = null }) {
   window.history.replaceState(null, "", url);
 }
 
+function showView(view) {
+  const running = view === "run";
+  landingView.hidden = running;
+  runView.hidden = !running;
+  const stage = document.getElementById("stage");
+  stage.classList.toggle("has-run", running);
+  if (!running) stage.classList.remove("has-graph");
+  document.body.classList.toggle("has-run", running);
+}
+
 const LIFECYCLE_LABELS = {
   running: "Building your Graph — safe to leave this tab.",
   overload_waiting: "Wikimedia is busy; this run is waiting and will keep its identity.",
@@ -70,13 +92,31 @@ const LIFECYCLE_LABELS = {
 };
 
 function renderRunState(data) {
+  showView("run");
+  document.getElementById("stage").classList.toggle("has-graph", data.status === "completed");
   waitingBox.hidden = data.status === "completed";
   runState.textContent = LIFECYCLE_LABELS[data.status] ?? `Run status: ${data.status}`;
   runProgress.textContent = `Crawled ${data.crawled} · Discovered ${data.discovered} · Depth ${data.currentDepth}`;
   runRecent.textContent = data.recent?.length ? `Recent: ${data.recent.join(" · ")}` : "Waiting for the first committed batch…";
+  const terminalOrInterrupted = ["failed", "expired", "recoverable", "overload_waiting"].includes(data.status);
+  runDetail.textContent = terminalOrInterrupted
+    ? LIFECYCLE_LABELS[data.status]
+    : data.status === "completed"
+      ? LIFECYCLE_LABELS.completed
+      : "You can leave this tab. The server keeps the run alive.";
+  runDetail.classList.toggle("run-detail-error", terminalOrInterrupted);
+  runCrawled.textContent = String(data.crawled ?? 0);
+  runDiscovered.textContent = String(data.discovered ?? 0);
+  runPercent.textContent = data.status === "completed" ? "✓" : ["failed", "expired"].includes(data.status) ? "—" : "…";
+  runPhase.textContent = data.status === "failed" || data.status === "expired" ? "stopped" : data.status === "completed" ? "ready" : "building";
+  runOrbit.className = `c-orbit orbit-${data.status}`;
+  runOrbit.classList.toggle("orbit-complete", data.status === "completed");
+  runOrbit.classList.toggle("orbit-failed", data.status === "failed" || data.status === "expired");
+  runBadge.textContent = data.status === "completed" ? "Ready" : data.status === "failed" || data.status === "expired" ? "Needs attention" : "Live";
   retryButton.hidden = !["recoverable", "overload_waiting"].includes(data.status);
   retryButton.dataset.runId = data.runId;
   retryButton.disabled = data.status === "overload_waiting";
+  runLiveLabel.hidden = data.status === "completed" || ["failed", "expired", "recoverable", "overload_waiting"].includes(data.status);
   statusBox.textContent = data.status === "completed" ? "" : "live run";
 }
 
@@ -91,7 +131,10 @@ async function refreshRun(runId) {
   }
   const state = await response.json();
   renderRunState(state);
-  if (state.status === "running" || state.status === "overload_waiting" || state.status === "recoverable") {
+  if (state.status === "completed") {
+    const graph = await fetch(`/api/runs/${runId}/graph`);
+    if (graph.ok) mountExperience(await graph.json());
+  } else if (state.status === "running" || state.status === "overload_waiting" || state.status === "recoverable") {
     const preview = await fetch(`/api/runs/${runId}/preview`);
     if (preview.ok) mountExperience(await preview.json());
   }
@@ -130,6 +173,7 @@ let activeLens = initialLens;
 // Ticket 11: the launch surface mounts every completed Graph the same way —
 // booting and swapping alike destroy the previous experience first.
 function mountExperience(graphPayload) {
+  showView("run");
   if (currentExperience) {
     currentExperience.destroy();
     // The old selection card refers to the swapped-out Graph.
@@ -162,6 +206,8 @@ function mountExperience(graphPayload) {
   renderLensButtons(activeLens);
   truncationBox.hidden = !graphPayload.truncated;
   showNotice("");
+  runTitle.textContent = graphPayload.seed ?? "Your Graph";
+  runUrl.href = window.location.href;
 }
 
 for (const [button, lens] of [
@@ -180,9 +226,29 @@ for (const [button, lens] of [
 let activeSource = null;
 function watchRun(runId) {
   activeSource?.close();
+  let stopped = false;
   const source = new EventSource(`/api/runs/${runId}/events`);
   activeSource = source;
-  const stop = () => source.close();
+  const poll = window.setInterval(async () => {
+    if (stopped) return;
+    try {
+      const state = await refreshRun(runId);
+      if (state.status === "completed") {
+        launcher.complete();
+        stop();
+      } else if (["failed", "expired", "recoverable", "overload_waiting"].includes(state.status)) {
+        launcher.fail(state.error ?? LIFECYCLE_LABELS[state.status]);
+        stop();
+      }
+    } catch {
+      // The SSE stream remains the primary update path; retry the snapshot.
+    }
+  }, 1000);
+  const stop = () => {
+    stopped = true;
+    window.clearInterval(poll);
+    source.close();
+  };
   source.addEventListener("progress", (event) => {
     const progress = JSON.parse(event.data);
     launcher.updateProgress(progress);
@@ -210,9 +276,11 @@ function watchRun(runId) {
       launcher.fail(await errorMessage(response));
       return;
     }
+    const stateResponse = await fetch(`/api/runs/${runId}`);
+    const state = stateResponse.ok ? await stateResponse.json() : null;
     launcher.complete();
     mountExperience(await response.json());
-    renderRunState({ runId, status: "completed", crawled: 0, discovered: 0, currentDepth: 0, recent: [] });
+    renderRunState(state ?? { runId, status: "completed", crawled: 0, discovered: 0, currentDepth: 0, recent: [] });
     syncUrl({ run: runId });
   });
   source.onerror = () => { refreshRun(runId).catch(() => {}); };
@@ -238,10 +306,6 @@ const launcher = createLauncher(launchForm, async (values) => {
   return {};
 });
 
-document.getElementById("launch-chip").addEventListener("click", () => {
-  launcher.open();
-});
-
 retryButton.addEventListener("click", async () => {
   const runId = retryButton.dataset.runId;
   if (!runId) return;
@@ -258,12 +322,10 @@ retryButton.addEventListener("click", async () => {
 if (bootRunId) {
   try {
     const state = await refreshRun(bootRunId);
-    if (state.status === "completed") {
-      const response = await fetch(`/api/runs/${bootRunId}/graph`);
-      if (response.ok) mountExperience(await response.json());
-    } else if (state.status !== "expired" && state.status !== "failed") watchRun(bootRunId);
+    if (state.status !== "completed" && state.status !== "expired" && state.status !== "failed") watchRun(bootRunId);
     if (state.status === "failed" || state.status === "expired") showNotice(state.error ?? LIFECYCLE_LABELS[state.status]);
   } catch (error) { showNotice(error.message); }
 } else {
+  showView("landing");
   showNotice("No Graph in view yet. Launch a crawl run and it will draw itself here.");
 }

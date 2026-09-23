@@ -8,8 +8,53 @@
     <link rel="stylesheet" crossorigin href="/assets/index-BaYoR_o5.css">
   </head>
   <body>
-    <main id="stage" class="stage">
-      <div id="graph" class="graph"></div>
+    <main id="stage" class="stage c-stage">
+      <section id="landing-view" class="c-landing">
+        <header class="c-header"><p class="proto-kicker">wikiGraph</p><span class="state-badge"><i></i>Start a run</span></header>
+        <div class="c-focus">
+          <p class="c-eyebrow">Start a new Graph</p>
+          <h1>Explore Wikipedia as a Graph</h1>
+          <p class="c-detail">Choose a starting article and we will build a navigable Graph around it.</p>
+          <form id="launch-form" class="c-search" aria-label="Launch a new crawl run">
+            <label for="launch-seed">Article or Wikipedia URL</label>
+            <input id="launch-seed" name="seed" type="text" autocomplete="off" spellcheck="false" value="Climate change" placeholder="Article title or Wikipedia URL" />
+            <div class="c-search-options">
+              <fieldset id="launch-depth"><legend>Depth</legend><div class="c-choice-row">
+                <button class="c-choice chip" type="button" data-depth="1" aria-pressed="false">1</button>
+                <button class="c-choice chip" type="button" data-depth="2" aria-pressed="true">2</button>
+                <button class="c-choice chip" type="button" data-depth="3" aria-pressed="false">3</button>
+              </div></fieldset>
+              <fieldset id="launch-edition"><legend>Edition</legend><div class="c-choice-row">
+                <button class="c-choice" type="button" data-language="es" aria-pressed="true">ES</button>
+                <button class="c-choice" type="button" data-language="en" aria-pressed="false">EN</button>
+              </div></fieldset>
+              <input id="launch-cap" name="nodeCap" type="hidden" value="500" />
+              <button id="launch-submit" class="primary" type="submit">Build Graph</button>
+            </div>
+            <p id="launch-progress" class="c-run-note" aria-live="polite" hidden></p>
+            <p id="launch-error" class="c-error" role="alert" hidden></p>
+          </form>
+          <p class="c-run-note">You can leave the tab after starting. Every run gets its own link.</p>
+        </div>
+        <footer class="c-footer"><span>Have a previous run? Open it from its saved link.</span></footer>
+      </section>
+
+      <section id="run-view" class="c-run" hidden>
+        <header class="c-header"><p class="proto-kicker">A new Graph is on its way</p><span class="state-badge state-live"><i></i><span id="run-badge">Live</span></span></header>
+        <div class="c-focus c-run-focus">
+          <div id="run-orbit" class="c-orbit orbit-running"><div class="c-orbit-ring"></div><div class="c-orbit-core"><strong id="run-percent">0%</strong><span id="run-phase">building</span></div></div>
+          <p id="run-eyebrow" class="c-eyebrow">Building requested Graph</p>
+          <h1 id="run-title">Your Graph</h1>
+          <p id="run-detail" class="c-detail">You can leave this tab. The server keeps the run alive.</p>
+          <section id="run-waiting" class="run-waiting" hidden aria-live="polite"><p id="run-state" class="run-state"></p><p id="run-progress" class="run-progress"></p><p id="run-recent" class="run-recent"></p></section>
+          <div class="c-metrics"><div><strong id="run-crawled">0</strong><span>articles crawled</span></div><div><strong id="run-discovered">0</strong><span>articles discovered</span></div></div>
+          <div class="c-actions"><span id="run-live-label" class="c-live-label">Live preview updates below</span><button id="run-retry" class="primary" type="button" hidden>Resume crawl</button></div>
+          <div id="run-preview" class="c-preview"><div id="graph" class="graph c-canvas"></div></div>
+          <p id="notice" class="notice"></p>
+        </div>
+        <footer class="c-footer"><span>Every run keeps its own link. You can close this tab and return later.</span><a id="run-url" href="#">Open run link</a></footer>
+      </section>
+
       <nav id="lens" class="lens" aria-label="Color encoding">
         <button id="lens-community" class="lens-button" type="button">Community</button>
         <button id="lens-level" class="lens-button" type="button">Level</button>
@@ -31,50 +76,6 @@
       <p id="truncation" class="truncation" role="status" hidden>
         Node cap reached. This Graph is partial.
       </p>
-      <p id="notice" class="notice"></p>
-      <section id="run-waiting" class="run-waiting" hidden aria-live="polite">
-        <p id="run-state" class="run-state"></p>
-        <p id="run-progress" class="run-progress"></p>
-        <p id="run-recent" class="run-recent"></p>
-        <button id="run-retry" type="button" hidden>Resume this run</button>
-      </section>
-      <button id="launch-chip" class="launch-chip" type="button" aria-haspopup="dialog">+ grafo</button>
-      <div id="launch-overlay" class="overlay" hidden>
-        <form id="launch-form" class="overlay-form" aria-label="Launch a new crawl run">
-          <p class="overlay-title">New crawl</p>
-          <input
-            id="launch-seed"
-            class="overlay-seed"
-            name="seed"
-            type="text"
-            autocomplete="off"
-            spellcheck="false"
-            placeholder="Seed — title or Wikipedia URL"
-          />
-          <div id="launch-depth" class="chip-row" role="group" aria-label="Depth">
-            <button class="chip" type="button" data-depth="1">1</button>
-            <button class="chip" type="button" data-depth="2" aria-pressed="true">2</button>
-            <button class="chip" type="button" data-depth="3">3</button>
-          </div>
-          <div id="launch-edition" class="chip-row" role="group" aria-label="Language edition">
-            <button class="chip" type="button" data-language="es" aria-pressed="true">ES</button>
-            <button class="chip" type="button" data-language="en">EN</button>
-          </div>
-          <label class="overlay-micro" for="launch-cap">Node cap</label>
-          <input
-            id="launch-cap"
-            class="overlay-cap"
-            name="nodeCap"
-            type="text"
-            inputmode="numeric"
-            autocomplete="off"
-            value="500"
-          />
-          <button id="launch-submit" class="overlay-launch" type="submit">Launch crawl</button>
-          <p id="launch-progress" class="overlay-progress" aria-live="polite" hidden></p>
-          <p id="launch-error" class="overlay-error" role="alert" hidden></p>
-        </form>
-      </div>
     </main>
   </body>
 </html>

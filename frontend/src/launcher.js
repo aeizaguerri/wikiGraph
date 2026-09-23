@@ -1,6 +1,6 @@
-// Launch form: one stateful launch contract rendered as either a full-bleed
-// overlay or a compact inline strip. Form state lives outside the DOM, so mode
-// changes never disturb a running crawl.
+// Launch form: the selected waiting experience keeps search and controls on the
+// landing surface. Form state lives outside the DOM so a running crawl can
+// replace the landing surface without losing the launch contract.
 export const CAP_MIN = 1;
 export const CAP_MAX = 5000;
 export const DEFAULT_CAP = 500;
@@ -12,19 +12,6 @@ export function clampCap(raw) {
 }
 
 export function createLauncher(form, onLaunch) {
-  const state = {
-    open: false,
-    mode: "overlay", // overlay | inline
-    phase: "idle", // idle | running
-    seed: "",
-    depth: 2,
-    language: "es",
-    cap: DEFAULT_CAP,
-    progress: null, // { crawled, discovered, depth }
-    error: null,
-  };
-
-  const overlay = document.getElementById("launch-overlay");
   const seed = form.elements.namedItem("seed");
   const cap = form.elements.namedItem("nodeCap");
   const depthRow = document.getElementById("launch-depth");
@@ -32,6 +19,15 @@ export function createLauncher(form, onLaunch) {
   const submit = document.getElementById("launch-submit");
   const progressLine = document.getElementById("launch-progress");
   const errorLine = document.getElementById("launch-error");
+  const state = {
+    phase: "idle", // idle | running
+    seed: seed.value,
+    depth: 2,
+    language: "es",
+    cap: DEFAULT_CAP,
+    progress: null, // { crawled, discovered, depth }
+    error: null,
+  };
 
   seed.addEventListener("input", () => {
     state.seed = seed.value;
@@ -78,8 +74,6 @@ export function createLauncher(form, onLaunch) {
   }
 
   function render() {
-    overlay.hidden = !state.open;
-    overlay.dataset.mode = state.mode;
     seed.value = state.seed;
     cap.value = String(state.cap);
     renderChips();
@@ -102,45 +96,13 @@ export function createLauncher(form, onLaunch) {
     }
   }
 
-  // A click on the overlay root — the backdrop — closes it; the form panel
-  // and its controls float above it, and no ✕ button exists anywhere.
-  overlay.addEventListener("click", (event) => {
-    if (state.mode === "overlay" && event.target === overlay) close();
-  });
-
-  document.addEventListener("keydown", (event) => {
-    const target = event.target;
-    if (
-      target instanceof HTMLElement &&
-      (target.matches("input, textarea, select") || target.isContentEditable)
-    ) {
-      return;
-    }
-    if (
-      event.key.toLowerCase() !== "f" ||
-      event.ctrlKey ||
-      event.metaKey ||
-      event.altKey
-    ) {
-      return;
-    }
-    event.preventDefault();
-    state.mode = state.mode === "overlay" ? "inline" : "overlay";
-    state.open = true;
-    render();
-  });
-
   function open() {
-    if (state.open) return;
-    state.open = true;
-    render();
     seed.focus();
   }
 
   function close() {
-    if (!state.open) return;
-    state.open = false;
-    render();
+    // The C layout has no modal to close. Keep this method for the shared
+    // launcher seam; completion changes the surrounding view instead.
   }
 
   form.addEventListener("submit", async (event) => {
@@ -193,13 +155,12 @@ export function createLauncher(form, onLaunch) {
     render();
   }
 
-  // Completion auto-closes the overlay and resets the launcher for the next one.
+  // Completion resets the landing form for the next independent run.
   function complete() {
     state.phase = "idle";
     state.progress = null;
     state.error = null;
     state.seed = "";
-    close();
   }
 
   render();

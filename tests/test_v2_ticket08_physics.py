@@ -44,7 +44,9 @@ NODE_POS_JS = """
 (node) => {
   const experience = window.__wikigraph;
   const attrs = experience.graph.getNodeAttributes(node);
-  return experience.sigma.graphToViewport({ x: attrs.x, y: attrs.y });
+  const point = experience.sigma.graphToViewport({ x: attrs.x, y: attrs.y });
+  const rect = document.getElementById("graph").getBoundingClientRect();
+  return { x: rect.left + point.x, y: rect.top + point.y };
 }
 """
 
