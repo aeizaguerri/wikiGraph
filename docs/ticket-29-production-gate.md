@@ -80,7 +80,8 @@ observability, not exposed by this CLI invocation.
 
 To close that instrumentation gap, this branch adds secret-free structured
 events for Wikimedia attempts, cache lookups, completion timing/process usage,
-and persistence writes in the ticket-29 observability commit below. The
+and persistence writes in commit
+`ec7dc3d517bb87a1f76da6a360bc6e8096840d3d`. The
 The deployed service is still the earlier commit above, so this is local code
 evidence only. It requires an explicitly authorized Render deployment of that
 commit (and no deployment was performed here) before a production benchmark can
