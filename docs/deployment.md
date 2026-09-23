@@ -45,11 +45,12 @@ serves that shell for direct route reloads. API and SSE responses are never
 served from the asset cache.
 
 Before publishing, run `npx wrangler whoami` and verify that the selected
-account is the intended free Workers account. Record the account/project and
-the dashboard billing/resource view before and after deployment. Do not enable
-paid features, add a custom domain, or deploy if authentication or account
-selection is unavailable. This checkout currently has no authenticated
-Wrangler session, so no production URL or free-tier publication is claimed.
+account is the intended free Workers account. `whoami` proves identity and
+Worker permission, not the billing plan: also record the account's dashboard
+Workers plan and billing/resource view before and after deployment (or use an
+account token with billing read permission). Do not enable paid features, add
+a custom domain, or deploy if plan verification or account selection is
+unavailable.
 
 Rollback is a Workers deployment rollback, for example:
 
