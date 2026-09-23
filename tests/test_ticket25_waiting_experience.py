@@ -60,7 +60,6 @@ async def test_browser_launch_shows_real_preview_and_reconnects_without_relaunch
     browser_page.on("request", lambda request: browser_requests.append(request))
 
     await browser_page.goto(str(view_server.base_url))
-    await browser_page.click("#launch-chip")
     await browser_page.fill("#launch-seed", "Live preview")
     await browser_page.click("#launch-submit")
     await browser_page.wait_for_function(

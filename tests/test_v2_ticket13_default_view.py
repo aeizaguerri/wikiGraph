@@ -19,7 +19,9 @@ async def test_root_serves_the_v2_experience_and_retires_v1(client) -> None:
     page = await client.get("/")
 
     assert page.status_code == 200
-    assert 'id="launch-overlay"' in page.text
+    assert 'id="landing-view"' in page.text
+    assert 'class="c-search"' in page.text
+    assert 'id="run-view"' in page.text
     assert 'id="lens-community"' in page.text
     assert "cytoscape" not in page.text.lower()
 
