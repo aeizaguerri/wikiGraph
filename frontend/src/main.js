@@ -28,6 +28,7 @@ const retryButton = document.getElementById("run-retry");
 const landingView = document.getElementById("landing-view");
 const runView = document.getElementById("run-view");
 const runTitle = document.getElementById("run-title");
+const runDetail = document.getElementById("run-detail");
 const runCrawled = document.getElementById("run-crawled");
 const runDiscovered = document.getElementById("run-discovered");
 const runPercent = document.getElementById("run-percent");
@@ -97,10 +98,16 @@ function renderRunState(data) {
   runState.textContent = LIFECYCLE_LABELS[data.status] ?? `Run status: ${data.status}`;
   runProgress.textContent = `Crawled ${data.crawled} · Discovered ${data.discovered} · Depth ${data.currentDepth}`;
   runRecent.textContent = data.recent?.length ? `Recent: ${data.recent.join(" · ")}` : "Waiting for the first committed batch…";
+  const terminalOrInterrupted = ["failed", "expired", "recoverable", "overload_waiting"].includes(data.status);
+  runDetail.textContent = terminalOrInterrupted
+    ? LIFECYCLE_LABELS[data.status]
+    : data.status === "completed"
+      ? LIFECYCLE_LABELS.completed
+      : "You can leave this tab. The server keeps the run alive.";
+  runDetail.classList.toggle("run-detail-error", terminalOrInterrupted);
   runCrawled.textContent = String(data.crawled ?? 0);
   runDiscovered.textContent = String(data.discovered ?? 0);
-  const progress = data.status === "completed" ? 100 : Math.min(99, Math.max(0, Number(data.crawled ?? 0)));
-  runPercent.textContent = `${progress}%`;
+  runPercent.textContent = data.status === "completed" ? "✓" : ["failed", "expired"].includes(data.status) ? "—" : "…";
   runPhase.textContent = data.status === "failed" || data.status === "expired" ? "stopped" : data.status === "completed" ? "ready" : "building";
   runOrbit.className = `c-orbit orbit-${data.status}`;
   runOrbit.classList.toggle("orbit-complete", data.status === "completed");
@@ -124,7 +131,10 @@ async function refreshRun(runId) {
   }
   const state = await response.json();
   renderRunState(state);
-  if (state.status === "running" || state.status === "overload_waiting" || state.status === "recoverable") {
+  if (state.status === "completed") {
+    const graph = await fetch(`/api/runs/${runId}/graph`);
+    if (graph.ok) mountExperience(await graph.json());
+  } else if (state.status === "running" || state.status === "overload_waiting" || state.status === "recoverable") {
     const preview = await fetch(`/api/runs/${runId}/preview`);
     if (preview.ok) mountExperience(await preview.json());
   }
@@ -216,9 +226,29 @@ for (const [button, lens] of [
 let activeSource = null;
 function watchRun(runId) {
   activeSource?.close();
+  let stopped = false;
   const source = new EventSource(`/api/runs/${runId}/events`);
   activeSource = source;
-  const stop = () => source.close();
+  const poll = window.setInterval(async () => {
+    if (stopped) return;
+    try {
+      const state = await refreshRun(runId);
+      if (state.status === "completed") {
+        launcher.complete();
+        stop();
+      } else if (["failed", "expired", "recoverable", "overload_waiting"].includes(state.status)) {
+        launcher.fail(state.error ?? LIFECYCLE_LABELS[state.status]);
+        stop();
+      }
+    } catch {
+      // The SSE stream remains the primary update path; retry the snapshot.
+    }
+  }, 1000);
+  const stop = () => {
+    stopped = true;
+    window.clearInterval(poll);
+    source.close();
+  };
   source.addEventListener("progress", (event) => {
     const progress = JSON.parse(event.data);
     launcher.updateProgress(progress);
@@ -292,10 +322,7 @@ retryButton.addEventListener("click", async () => {
 if (bootRunId) {
   try {
     const state = await refreshRun(bootRunId);
-    if (state.status === "completed") {
-      const response = await fetch(`/api/runs/${bootRunId}/graph`);
-      if (response.ok) mountExperience(await response.json());
-    } else if (state.status !== "expired" && state.status !== "failed") watchRun(bootRunId);
+    if (state.status !== "completed" && state.status !== "expired" && state.status !== "failed") watchRun(bootRunId);
     if (state.status === "failed" || state.status === "expired") showNotice(state.error ?? LIFECYCLE_LABELS[state.status]);
   } catch (error) { showNotice(error.message); }
 } else {
