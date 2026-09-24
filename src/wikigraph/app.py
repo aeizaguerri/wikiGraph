@@ -14,7 +14,7 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
@@ -428,16 +428,27 @@ def create_app(
 
     @app.get("/api/runs/{run_id}/events")
     async def run_events(run_id: str) -> StreamingResponse:
-        run = _require_run(store, run_id)
+        try:
+            run = _require_run(store, run_id)
+        except PersistenceError as exc:
+            raise _error(503, "persistence_unavailable", str(exc)) from exc
+        stream = (
+            _remote_event_stream(store, run_id, run)
+            if isinstance(store, SupabaseCrawlRunStore) and getattr(run, "task", None) is None
+            else _event_stream(run)
+        )
         return StreamingResponse(
-            _event_stream(run),
+            stream,
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache"},
         )
 
     @app.get("/api/runs/{run_id}", response_model=RunStateOut)
     async def run_state(run_id: str) -> RunStateOut:
-        run = _require_run(store, run_id)
+        try:
+            run = _require_run(store, run_id)
+        except PersistenceError as exc:
+            raise _error(503, "persistence_unavailable", str(exc)) from exc
         if run.status is RunStatus.EXPIRED:
             raise _error(
                 410,
@@ -466,7 +477,10 @@ def create_app(
 
     @app.get("/api/runs/{run_id}/preview", response_model=PreviewOut)
     async def run_preview(run_id: str) -> PreviewOut:
-        run = _require_run(store, run_id)
+        try:
+            run = _require_run(store, run_id)
+        except PersistenceError as exc:
+            raise _error(503, "persistence_unavailable", str(exc)) from exc
         if run.status is RunStatus.EXPIRED:
             raise _error(
                 410,
@@ -496,8 +510,20 @@ def create_app(
 
     @app.get("/api/runs/{run_id}/graph")
     async def run_graph(run_id: str) -> GraphOut:
-        run = _require_run(store, run_id)
-        await run.wait_done()
+        try:
+            run = _require_run(store, run_id)
+        except PersistenceError as exc:
+            raise _error(503, "persistence_unavailable", str(exc)) from exc
+        try:
+            if isinstance(store, SupabaseCrawlRunStore) and getattr(run, "task", None) is None:
+                canonical = await store.wait_for_canonical(run_id)
+                if canonical is None:
+                    raise _error(404, "unknown_run", "No crawl run with that identifier.")
+                run = canonical
+            else:
+                await run.wait_done()
+        except PersistenceError as exc:
+            raise _error(503, "persistence_unavailable", str(exc)) from exc
         if (
             run.status is RunStatus.FAILED
             or run.result is None
@@ -582,6 +608,52 @@ async def _event_stream(run: CrawlRunHandle) -> AsyncIterator[str]:
                 return
     finally:
         run.unsubscribe(queue)
+
+
+async def _remote_event_stream(
+    store: SupabaseCrawlRunStore, run_id: str, run: CrawlRunHandle
+) -> AsyncIterator[str]:
+    """Poll canonical progress/status for a run owned by another process."""
+    previous_progress: dict[str, Any] = {}
+    previous_status: RunStatus | None = None
+    last_heartbeat = asyncio.get_running_loop().time()
+    try:
+        while True:
+            if previous_status is not None:
+                await asyncio.sleep(store._remote_poll_seconds)
+            current = await store.poll_canonical(run_id)
+            if current is None:
+                yield "event: error\ndata: {\"code\":\"run_unavailable\"}\n\n"
+                return
+            if current.progress != previous_progress:
+                previous_progress = dict(current.progress)
+                yield f"event: progress\ndata: {json.dumps(previous_progress)}\n\n"
+            if current.status is not previous_status:
+                previous_status = current.status
+                event_type = {
+                    RunStatus.COMPLETED: "completed",
+                    RunStatus.FAILED: "failed",
+                    RunStatus.RECOVERABLE: "recoverable",
+                    RunStatus.OVERLOAD_WAITING: "overload_waiting",
+                    RunStatus.EXPIRED: "expired",
+                }.get(current.status)
+                if event_type is not None:
+                    payload: dict[str, Any] = {"error": current.error} if current.error else {}
+                    if event_type == "completed":
+                        payload = {"truncated": current.truncated}
+                    yield f"event: {event_type}\ndata: {json.dumps(payload)}\n\n"
+                    return
+            now = asyncio.get_running_loop().time()
+            if current.status is not RunStatus.RUNNING:
+                return
+            if now - last_heartbeat >= SSE_HEARTBEAT_SECONDS:
+                last_heartbeat = now
+                yield ": ping\n\n"
+    except PersistenceError:
+        # An established stream cannot change its HTTP status; terminate rather
+        # than inventing progress or presenting a partial Graph as authoritative.
+        yield "event: error\ndata: {\"code\":\"persistence_unavailable\"}\n\n"
+        return
 
 
 app = create_app()

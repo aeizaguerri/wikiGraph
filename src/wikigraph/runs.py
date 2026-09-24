@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import secrets
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -270,6 +271,7 @@ class InMemoryCrawlRunStore:
         cache: ResponseCache | None = None,
     ) -> None:
         self._runs: dict[str, CrawlRun] = {}
+        self._remote_poll_seconds = 0.25
         self._governor = governor
         self._cache = cache if cache is not None else InMemoryResponseCache()
 
@@ -462,6 +464,9 @@ class SupabaseCrawlRunStore:
             )
         )
         self._runs: dict[str, CrawlRun] = {}
+        self._remote_poll_seconds = 0.5
+        self._last_reconcile_at = 0.0
+        self._reconcile_lock = threading.Lock()
 
     @property
     def _endpoint(self) -> str:
@@ -619,6 +624,30 @@ class SupabaseCrawlRunStore:
         if not records:
             return active
         row = records[0]
+        # Locally-owned work is authoritative only while its task is actually
+        # running. A hydrated handle has no task and must follow the database.
+        if active is not None and active.task is not None and not active.task.done():
+            return active
+        if row.get("status") == RunStatus.RUNNING.value and row.get("owner_token") is None:
+            raise PersistenceError(
+                "Legacy crawl run has no owner lease; operator repair is required."
+            )
+        if row.get("status") == RunStatus.RUNNING.value and "owner_token" in row:
+            # Reconciliation scans all expired leases; bound that global sweep
+            # independently of the per-run observation polling frequency.
+            with self._reconcile_lock:
+                now = time.monotonic()
+                if now - self._last_reconcile_at >= 5.0:
+                    self._rpc_request("reconcile_expired_crawl_runs", {})
+                    self._last_reconcile_at = now
+            records = self._request(
+                "GET",
+                headers=self._headers(),
+                params={"run_id": f"eq.{run_id}", "limit": "1"},
+            )
+            if not records:
+                return None
+            row = records[0]
         # Older test doubles and pre-retention schemas do not expose expiry;
         # canonical migrated rows do, so only those reads invoke cleanup.
         if "expires_at" in row:
@@ -632,7 +661,8 @@ class SupabaseCrawlRunStore:
                 return None
             row = records[0]
         if active is not None and row.get("status") != RunStatus.EXPIRED.value:
-            return active
+            if active.task is not None and not active.task.done():
+                return active
         request = CrawlRequest(
             seed=str(row["seed"]),
             language=str(row["language"]),
@@ -648,8 +678,28 @@ class SupabaseCrawlRunStore:
             cache=self._cache,
         )
         _hydrate_run(run, row)
+        if run.status in {
+            RunStatus.COMPLETED,
+            RunStatus.FAILED,
+            RunStatus.RECOVERABLE,
+            RunStatus.OVERLOAD_WAITING,
+            RunStatus.EXPIRED,
+        }:
+            run._done.set()
         self._runs[run_id] = run
         return run
+
+    async def wait_for_canonical(self, run_id: str) -> CrawlRun | None:
+        """Wait for remote ownership to publish a terminal canonical record."""
+        while True:
+            run = await asyncio.to_thread(self.get, run_id)
+            if run is None or run.status is not RunStatus.RUNNING:
+                return run
+            await asyncio.sleep(self._remote_poll_seconds)
+
+    async def poll_canonical(self, run_id: str) -> CrawlRun | None:
+        """Refresh a remote-owned handle without taking or renewing ownership."""
+        return await asyncio.to_thread(self.get, run_id)
 
     def cleanup_expired(self, now: datetime | None = None) -> int:
         """Remove detailed state through the database-authorized cleanup RPC."""

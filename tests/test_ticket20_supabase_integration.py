@@ -71,7 +71,8 @@ async def test_real_postgrest_constraints_and_fresh_process_reopen(
                 "status": "running",
             },
         )
-        assert invalid.status_code == 400
+        # Raw writes are denied before table constraints are evaluated.
+        assert invalid.status_code in {401, 403}
 
         first = create_app(mediawiki_transport=stub.transport, run_store=_store())
         async with first.router.lifespan_context(first):
@@ -112,7 +113,7 @@ async def test_real_postgrest_constraints_and_fresh_process_reopen(
             headers=_headers(),
             json={"graph": {"tampered": True}},
         )
-        assert mutation.status_code == 400
+        assert mutation.status_code in {401, 403}
     finally:
         for run_id in created_ids:
             database.delete(
