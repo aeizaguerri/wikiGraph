@@ -27,18 +27,41 @@ class PostgrestRuns:
         return httpx.MockTransport(self.handle)
 
     def handle(self, request: httpx.Request) -> httpx.Response:
-        if request.method == "POST":
-            row = json.loads(request.content)
+        if request.url.path.endswith("/rpc/create_owned_crawl_run"):
+            args = json.loads(request.content)
+            row = {
+                "run_id": args["p_run_id"], "seed": args["p_seed"],
+                "language": args["p_language"], "depth": args["p_depth"],
+                "node_cap": args["p_node_cap"], "status": "running",
+                "progress": {"crawled": 0, "discovered": 1, "depth": 0, "recent": []},
+                "checkpoint": args["p_checkpoint"], "owner_token": args["p_owner_token"],
+                "owner_version": 1,
+            }
             self.rows[str(row["run_id"])] = row
-            return httpx.Response(201, json=[row])
+            return httpx.Response(200, json=[{"run_id": row["run_id"], "owner_version": 1}])
+        if request.url.path.endswith("/rpc/claim_crawl_run"):
+            args = json.loads(request.content)
+            row = self.rows[args["p_run_id"]]
+            if row["owner_version"] != args["p_expected_version"] or row["status"] not in {"recoverable", "overload_waiting"}:
+                return httpx.Response(200, json=[])
+            row.update(status="running", owner_token=args["p_owner_token"], owner_version=row["owner_version"] + 1)
+            return httpx.Response(200, json=[{"owner_version": row["owner_version"]}])
+        if request.url.path.endswith("/rpc/fenced_update_crawl_run"):
+            args = json.loads(request.content)
+            row = self.rows.get(args["p_run_id"])
+            if row is None or row.get("owner_token") != args["p_owner_token"] or row.get("owner_version") != args["p_owner_version"]:
+                return httpx.Response(200, json=False)
+            row.update(args["p_patch"])
+            op = args["p_operation"]
+            if op in {"completed", "failed", "recoverable", "overload_waiting"}:
+                row["status"] = op
+                row["owner_token"] = None
+                row["owner_version"] += 1
+            return httpx.Response(200, json=True)
         run_id = request.url.params.get("run_id", "").removeprefix("eq.")
         if request.method == "GET":
             row = self.rows.get(run_id)
             return httpx.Response(200, json=[] if row is None else [row])
-        if request.method == "PATCH":
-            row = self.rows[run_id]
-            row.update(json.loads(request.content))
-            return httpx.Response(200, json=[row])
         return httpx.Response(405)
 
 
@@ -172,11 +195,11 @@ async def test_missing_update_row_is_reported_as_persistence_failure(
     store = SupabaseCrawlRunStore(
         "https://supabase.test",
         "server-only-test-key",
-        client=httpx.Client(transport=httpx.MockTransport(lambda _: httpx.Response(200, json=[]))),
+        client=httpx.Client(transport=httpx.MockTransport(lambda _: httpx.Response(200, json=False))),
         governor=GlobalWikimediaGovernor(DeterministicClock()),
     )
-    with pytest.raises(PersistenceError, match="did not update"):
-        store._patch("missing-run", {"status": "failed"})
+    with pytest.raises(PersistenceError, match="stale or invalid"):
+        store._fenced_update("missing-run", "token", 1, "failed", {"error": "failure"})
 
 
 async def test_update_failure_turns_the_owning_run_into_a_failure(
@@ -185,9 +208,9 @@ async def test_update_failure_turns_the_owning_run_into_a_failure(
     stub.add_page("Hub")
 
     def update_drops(_: httpx.Request) -> httpx.Response:
-        if _.method == "POST":
-            return httpx.Response(201, json=[{"run_id": json.loads(_.content)["run_id"]}])
-        return httpx.Response(200, json=[])
+        if _.url.path.endswith("/rpc/create_owned_crawl_run"):
+            return httpx.Response(200, json=[{"run_id": json.loads(_.content)["p_run_id"], "owner_version": 1}])
+        return httpx.Response(200, json=False)
 
     store = SupabaseCrawlRunStore(
         "https://supabase.test",
@@ -200,7 +223,7 @@ async def test_update_failure_turns_the_owning_run_into_a_failure(
 
     assert run.status.value == "failed"
     assert run.error is not None
-    assert "did not update" in run.error
+    assert "stale or invalid" in run.error
 
 
 async def test_persistence_failure_is_not_replaced_by_an_in_memory_run(

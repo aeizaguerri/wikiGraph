@@ -60,7 +60,7 @@ declare r public.crawl_runs%rowtype; now_at timestamptz;
 begin
   select * into r from public.crawl_runs where crawl_runs.run_id = p_run_id for update;
   now_at := clock_timestamp();
-  if not found or r.status not in ('running','recoverable')
+  if not found or r.status not in ('running','recoverable','overload_waiting')
      or r.owner_version <> p_expected_version
      or (r.status = 'running' and (r.owner_token is null or r.lease_until is null))
      or (r.status = 'running' and r.lease_until is not null and r.lease_until > now_at)
@@ -121,7 +121,7 @@ declare r public.crawl_runs%rowtype; now_at timestamptz;
 begin
   select * into r from public.crawl_runs where run_id=p_run_id for update;
   now_at:=clock_timestamp();
-  if not found or r.status<>'running' or r.owner_token is distinct from p_owner_token
+  if not found or r.status not in ('running','overload_waiting') or r.owner_token is distinct from p_owner_token
      or r.owner_version<>p_owner_version or r.lease_until<=now_at then return false; end if;
   if p_operation='progress' and p_patch ?& array['progress']
      and (p_patch - 'progress')='{}'::jsonb and jsonb_typeof(p_patch->'progress')='object' then
@@ -134,7 +134,7 @@ begin
      and (p_patch - 'graph')='{}'::jsonb and jsonb_typeof(p_patch->'graph')='object' then
     update public.crawl_runs set status='completed',graph=p_patch->'graph',completed_at=clock_timestamp(),
       owner_token=null,owner_version=owner_version+1,lease_until=null where run_id=p_run_id;
-  elsif p_operation in ('failed','recoverable') and p_patch ?& array['error']
+  elsif p_operation in ('failed','recoverable','overload_waiting') and p_patch ?& array['error']
      and (p_patch - array['error','retry_state'])='{}'::jsonb
      and jsonb_typeof(p_patch->'error') in ('string','null') then
     update public.crawl_runs set status=p_operation,error=p_patch->>'error',
@@ -150,8 +150,8 @@ end $$;
 create or replace function public.repair_legacy_crawl_run(
   p_run_id text, p_expected_updated_at timestamptz, p_operator_note text
 )
-returns uuid language plpgsql security definer set search_path = public, pg_temp as $$
-declare r public.crawl_runs%rowtype; token uuid:=gen_random_uuid();
+returns void language plpgsql security definer set search_path = public, pg_temp as $$
+declare r public.crawl_runs%rowtype;
 begin
   select * into r from public.crawl_runs where run_id=p_run_id for update;
   if not found or r.status<>'running' or r.owner_token is not null
@@ -161,9 +161,10 @@ begin
   end if;
   insert into public.crawl_run_ownership_repairs(run_id,expected_updated_at,previous_owner_token,previous_owner_version,operator_note)
     values(p_run_id,p_expected_updated_at,r.owner_token,r.owner_version,p_operator_note);
-  update public.crawl_runs set owner_token=token,owner_version=1,
-    lease_until=clock_timestamp()+interval '90 seconds' where run_id=p_run_id;
-  return token;
+  update public.crawl_runs set status='recoverable', owner_token=null,
+    owner_version=owner_version+1, lease_until=null,
+    error=coalesce(error,'Legacy run repaired after application binaries were drained')
+    where run_id=p_run_id;
 end $$;
 
 revoke all on function public.create_owned_crawl_run(text,text,text,smallint,integer,jsonb,uuid,integer) from public, anon, authenticated;

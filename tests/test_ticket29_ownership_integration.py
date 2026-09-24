@@ -119,6 +119,7 @@ def test_stale_owner_cannot_complete_fail_or_recover(operation: str, patch: dict
     ("completed", {"graph": {"nodes": [], "edges": []}}, "completed"),
     ("failed", {"error": "controlled failure"}, "failed"),
     ("recoverable", {"error": "controlled recovery", "retry_state": {"attempt": 1}}, "recoverable"),
+    ("overload_waiting", {"error": "controlled overload", "retry_state": {"attempts": 2}}, "overload_waiting"),
 ])
 def test_current_fence_can_apply_only_the_selected_transition(
     operation: str, patch: dict[str, object], expected_status: str,
@@ -152,9 +153,8 @@ def test_legacy_null_owner_is_not_claimed_and_operator_repair_is_guarded_and_aud
     assert claim.status_code == 200 and claim.json() == []
     assert _sql(f"select owner_token is null and owner_version=0 from public.crawl_runs where run_id='{run_id}'") == "t"
     assert _sql(f"select has_function_privilege('service_role','public.repair_legacy_crawl_run(text,timestamptz,text)','execute')") == "f"
-    token = _sql(f"select public.repair_legacy_crawl_run('{run_id}','{updated}'::timestamptz,'post-drain ticket29 local test')")
-    assert token
-    assert _sql(f"select owner_token is not null and owner_version=1 from public.crawl_runs where run_id='{run_id}'") == "t"
+    _sql(f"select public.repair_legacy_crawl_run('{run_id}','{updated}'::timestamptz,'post-drain ticket29 local test')")
+    assert _sql(f"select status='recoverable' and owner_token is null and lease_until is null and owner_version=1 from public.crawl_runs where run_id='{run_id}'") == "t"
     assert _sql(f"select count(*) from public.crawl_run_ownership_repairs where run_id='{run_id}'") == "1"
     with pytest.raises(subprocess.CalledProcessError):
         _sql(f"select public.repair_legacy_crawl_run('{run_id}','{updated}'::timestamptz,'stale second repair')")

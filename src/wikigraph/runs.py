@@ -524,6 +524,18 @@ class SupabaseCrawlRunStore:
             json=payload,
         )
 
+    def _rpc_boolean(self, function: str, payload: dict[str, Any]) -> bool:
+        endpoint = self._rest_endpoint(f"rpc/{function}")
+        try:
+            response = self._client.post(endpoint, headers=self._headers(), json=payload)
+            response.raise_for_status()
+            value = response.json()
+        except (httpx.HTTPError, OSError, ValueError) as exc:
+            raise PersistenceError("Supabase persistence operation failed.") from exc
+        if not isinstance(value, bool):
+            raise PersistenceError("Supabase returned an invalid run update result.")
+        return value
+
     def _request(self, method: str, **kwargs: Any) -> list[dict[str, Any]]:
         return self._request_url(self._endpoint, method, **kwargs)
 
@@ -543,22 +555,21 @@ class SupabaseCrawlRunStore:
     def start_run(
         self, request: CrawlRequest, transport: httpx.AsyncBaseTransport | None
     ) -> CrawlRun:
-        run_id = secrets.token_urlsafe(24)
+        run_id = str(uuid.uuid4())
+        owner_token = str(uuid.uuid4())
         row = {
-            "run_id": run_id,
-            "seed": request.seed,
-            "language": request.language,
-            "depth": request.depth,
-            "node_cap": request.node_cap,
-            "status": RunStatus.RUNNING.value,
-            "progress": {"crawled": 0, "discovered": 1, "depth": 0, "recent": []},
-            "checkpoint": _checkpoint_json(_initial_checkpoint(request)),
+            "p_run_id": run_id,
+            "p_seed": request.seed,
+            "p_language": request.language,
+            "p_depth": request.depth,
+            "p_node_cap": request.node_cap,
+            "p_checkpoint": _checkpoint_json(_initial_checkpoint(request)),
+            "p_owner_token": owner_token,
         }
-        records = self._request(
-            "POST", headers=self._headers(representation=True), json=row
-        )
+        records = self._rpc_request("create_owned_crawl_run", row)
         if not records or records[0].get("run_id") != run_id:
             raise PersistenceError("Supabase did not create the crawl run.")
+        owner_version = int(records[0]["owner_version"])
         emit(
             "persistence_write",
             run_id=run_id,
@@ -569,13 +580,23 @@ class SupabaseCrawlRunStore:
         run = CrawlRun(
             run_id,
             request,
-            persist_progress=lambda progress: self._save_progress(run_id, progress),
-            persist_checkpoint=lambda checkpoint: self._save_checkpoint(run_id, checkpoint),
-            persist_completion=lambda completed: self._save_completion(completed),
-            persist_failure=lambda failed: self._save_failure(failed),
+            persist_progress=lambda progress: self._save_progress(
+                run_id, owner_token, owner_version, progress
+            ),
+            persist_checkpoint=lambda checkpoint: self._save_checkpoint(
+                run_id, owner_token, owner_version, checkpoint
+            ),
+            persist_completion=lambda completed: self._save_completion(
+                completed, owner_token, owner_version
+            ),
+            persist_failure=lambda failed: self._save_failure(
+                failed, owner_token, owner_version
+            ),
             governor=self._governor,
             cache=self._cache,
-            persist_recovery=lambda recovered: self._save_recovery(recovered),
+            persist_recovery=lambda recovered: self._save_recovery(
+                recovered, owner_token, owner_version
+            ),
         )
         run.task = asyncio.create_task(run.start(transport))
         self._runs[run_id] = run
@@ -669,32 +690,61 @@ class SupabaseCrawlRunStore:
         checkpoint = _checkpoint_from_json(row.get("checkpoint"))
         if checkpoint is None:
             raise PersistenceError("Recoverable crawl run has no checkpoint.")
-        self._patch(
-            run_id,
-            {"status": RunStatus.RUNNING.value, "error": None, "retry_state": None},
+        owner_token = str(uuid.uuid4())
+        claimed = self._rpc_request(
+            "claim_crawl_run",
+            {
+                "p_run_id": run_id,
+                "p_owner_token": owner_token,
+                "p_expected_version": int(row.get("owner_version", 0)),
+            },
         )
+        if not claimed:
+            raise PersistenceError(
+                "Crawl run ownership changed before it could be claimed."
+            )
+        owner_version = int(claimed[0]["owner_version"])
         run = CrawlRun(
             run_id,
             request,
             governor=self._governor,
             cache=self._cache,
             checkpoint=checkpoint,
-            persist_progress=lambda progress: self._save_progress(run_id, progress),
-            persist_checkpoint=lambda value: self._save_checkpoint(run_id, value),
-            persist_completion=lambda completed: self._save_completion(completed),
-            persist_failure=lambda failed: self._save_failure(failed),
-            persist_recovery=lambda recovered: self._save_recovery(recovered),
+            persist_progress=lambda progress: self._save_progress(
+                run_id, owner_token, owner_version, progress
+            ),
+            persist_checkpoint=lambda value: self._save_checkpoint(
+                run_id, owner_token, owner_version, value
+            ),
+            persist_completion=lambda completed: self._save_completion(
+                completed, owner_token, owner_version
+            ),
+            persist_failure=lambda failed: self._save_failure(
+                failed, owner_token, owner_version
+            ),
+            persist_recovery=lambda recovered: self._save_recovery(
+                recovered, owner_token, owner_version
+            ),
         )
         run.task = asyncio.create_task(run.start(transport))
         self._runs[run_id] = run
         return run
 
-    def _save_progress(self, run_id: str, progress: Progress) -> None:
-        self._patch(run_id, {"progress": _progress_json(progress)})
+    def _save_progress(
+        self, run_id: str, token: str, version: int, progress: Progress
+    ) -> None:
+        self._fenced_update(
+            run_id, token, version, "progress", {"progress": _progress_json(progress)}
+        )
 
-    def _save_checkpoint(self, run_id: str, checkpoint: CrawlCheckpoint) -> None:
-        self._patch(
+    def _save_checkpoint(
+        self, run_id: str, token: str, version: int, checkpoint: CrawlCheckpoint
+    ) -> None:
+        self._fenced_update(
             run_id,
+            token,
+            version,
+            "checkpoint",
             {
                 "checkpoint": _checkpoint_json(checkpoint),
                 "progress": {
@@ -706,7 +756,7 @@ class SupabaseCrawlRunStore:
             },
         )
 
-    def _save_completion(self, run: CrawlRun) -> None:
+    def _save_completion(self, run: CrawlRun, token: str, version: int) -> None:
         if run.result is None or run.communities is None:
             raise PersistenceError("Cannot persist a completion without a Graph.")
         graph = {
@@ -719,43 +769,50 @@ class SupabaseCrawlRunStore:
             "community_count": run.communities.count,
             "modularity": run.communities.modularity,
         }
-        self._patch(run.id, {"status": RunStatus.COMPLETED.value, "graph": graph})
+        self._fenced_update(run.id, token, version, "completed", {"graph": graph})
 
-    def _save_failure(self, run: CrawlRun) -> None:
-        self._patch(
-            run.id,
-            {"status": RunStatus.FAILED.value, "error": run.error},
-        )
+    def _save_failure(self, run: CrawlRun, token: str, version: int) -> None:
+        self._fenced_update(run.id, token, version, "failed", {"error": run.error})
 
-    def _save_recovery(self, run: CrawlRun) -> None:
-        self._patch(
+    def _save_recovery(self, run: CrawlRun, token: str, version: int) -> None:
+        operation = "overload_waiting" if run.status is RunStatus.OVERLOAD_WAITING else "recoverable"
+        self._fenced_update(
             run.id,
+            token,
+            version,
+            operation,
             {
-                "status": (
-                    RunStatus.OVERLOAD_WAITING.value
-                    if run.status is RunStatus.OVERLOAD_WAITING
-                    else RunStatus.RECOVERABLE.value
-                ),
                 "error": run.error,
                 "retry_state": run.retry_state,
             },
         )
 
-    def _patch(self, run_id: str, values: dict[str, Any]) -> None:
-        records = self._request(
-            "PATCH",
-            headers=self._headers(representation=True),
-            params={"run_id": f"eq.{run_id}"},
-            json=values,
+    def _fenced_update(
+        self,
+        run_id: str,
+        token: str,
+        version: int,
+        operation: str,
+        patch: dict[str, Any],
+    ) -> None:
+        updated = self._rpc_boolean(
+            "fenced_update_crawl_run",
+            {
+                "p_run_id": run_id,
+                "p_owner_token": token,
+                "p_owner_version": version,
+                "p_operation": operation,
+                "p_patch": patch,
+            },
         )
-        if not records or records[0].get("run_id") != run_id:
-            raise PersistenceError("Supabase did not update the crawl run.")
+        if not updated:
+            raise PersistenceError("Supabase rejected a stale or invalid crawl run update.")
         emit(
             "persistence_write",
             run_id=run_id,
-            operation="patch",
-            fields=sorted(values),
-            payload_bytes=len(str(values).encode()),
+            operation=operation,
+            fields=sorted(patch),
+            payload_bytes=len(str(patch).encode()),
         )
 
     async def shutdown(self) -> None:
