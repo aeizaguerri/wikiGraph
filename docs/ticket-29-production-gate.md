@@ -34,6 +34,10 @@ report so missing evidence is reviewable.
 | `uv run python -m benchmarks.ticket29_production_gate --render-url https://wikigraph.onrender.com` | exit 1, 0 launches, 0 fault injections; all incomplete criteria listed in report | fail-closed collector |
 | `node --test cloudflare/worker.test.js` | 2 passed, 0 skipped | local Cloudflare proxy tests |
 | `uv run pytest -q` after ticket-29 observability changes | 128 passed, 0 skipped, 4:21 | local Podman/Postgres/PostgREST harness |
+| `uv run pytest tests/test_ticket29_cache_index.py -q` | 1 passed | local role-shaped PostgREST harness with migration `20260924000006` |
+| `uv run pytest -q` after the cache-index migration and logger handler fix | 129 passed, 0 skipped, 4:21 | local Podman/Postgres/PostgREST harness |
+| `uv run mypy src` after the cache-index migration and logger handler fix | success, 12 source files | local typecheck |
+| Uvicorn probe invoking `emit("cache_write_probe", status_code=500)` | HTTP 200; JSON INFO event emitted to stderr | local production-shaped ASGI server |
 
 The local benchmark's `simulated_time` is 654.5 seconds. It is not a wall-clock
 completion measurement. It has no Render CPU, Render memory, cache-hit,
@@ -112,11 +116,39 @@ failure: POST /rest/v1/upstream_response_cache?on_conflict=cache_key returned HT
 This is an actual failed production attempt, not a benchmark pass. No request,
 continuation, cache-hit, retry-delay, fairness, process CPU/RSS, Render CPU/
 memory, or persistence-effect metrics were recorded because the deployed
-structured logger emitted no events. The failure is isolated to the cache write
-path as reported by the run; it is not evidence of a hosted Supabase outage,
-and no outage was induced. Do not repeat another heavy run until the cache-500
-response is diagnosed through the deployed instrumentation or an approved
-read-only Supabase/Render diagnostic.
+structured logger emitted no events. The user-provided hosted Supabase log export
+confirmed the exact cause:
+
+```text
+2026-09-24T19:07:30.594Z SQLSTATE 54000
+index row size 2824 exceeds btree version 4 maximum 2704 for index
+upstream_response_cache_kind_edition_normalized_request_con_key
+```
+
+The corresponding edge record was the cache POST at `19:07:30.504Z`. A local
+real-Postgres/PostgREST role-shaped reproduction with 50 high-entropy legitimate
+titles produced the same HTTP 500 and PostgreSQL `54000`; after migration
+`20260924000006_bound_cache_identity_index.sql`, the same upsert, repeat upsert,
+different-continuation read, and collision guard passed. The raw identity columns
+remain stored for inspection and freshness/access constraints remain unchanged.
+The bounded `cache_key` primary key is the PostgREST conflict target; its
+before-write guard rejects a digest identity mismatch rather than silently
+overwriting a fact if a SHA-256 collision were ever presented.
+
+The migration drops only the oversized compound unique constraint and replaces
+it with a length-framed, bounded MD5 identity index; it does not delete cached
+facts. A digest collision can reject a write but cannot silently merge distinct
+facts. It takes PostgreSQL's `ACCESS EXCLUSIVE` table lock while the constraint
+and index are changed; the migration is transactional and rolls back on failure.
+Deploy the migration before deploying the runtime that relies on it:
+
+```text
+supabase db push --project-ref bcycfbdmjqgyghultkrl   # authorized operator only
+then deploy the runtime commit and verify INFO cache telemetry
+```
+
+Do not repeat another heavy run until that migration and the logger/telemetry fix
+are deployed and the resulting cache-write events are observed.
 
 No blind production 2,500-Article load, restart, fault injection, or claim of
 Render CPU/memory was made. A maintainer with those exact permissions must

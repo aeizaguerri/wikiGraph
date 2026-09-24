@@ -10,6 +10,11 @@ from typing import Any
 
 logger = logging.getLogger("wikigraph.observability")
 logger.setLevel(logging.INFO)
+if not logger.handlers:
+    handler = logging.StreamHandler()
+    handler.setLevel(logging.INFO)
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    logger.addHandler(handler)
 
 
 def emit(event: str, **fields: Any) -> None:
