@@ -100,6 +100,7 @@ class CrawlRun:
         self._cache = cache if cache is not None else InMemoryResponseCache()
         self._persist_recovery = persist_recovery
         self._checkpoint = checkpoint
+        self._ownership_lost = False
         self.retry_state: dict[str, Any] | None = None
         self._started_at = time.perf_counter()
         self._start_usage = process_usage()
@@ -180,7 +181,7 @@ class CrawlRun:
         except asyncio.CancelledError:
             self.status = RunStatus.RECOVERABLE
             self.error = "The crawl process was interrupted; retry to resume."
-            if self._persist_recovery is not None:
+            if self._persist_recovery is not None and not self._ownership_lost:
                 self._persist_recovery(self)
             self.publish(RunEvent(RECOVERABLE_EVENT, {"error": self.error}))
             raise
@@ -435,6 +436,7 @@ class SupabaseCrawlRunStore:
         governor: GlobalWikimediaGovernor = DEFAULT_GOVERNOR,
         cache: ResponseCache | None = None,
         clock: Callable[[], datetime] | None = None,
+        heartbeat_interval_seconds: float = 30.0,
     ) -> None:
         self._url = (url or os.environ.get("SUPABASE_URL", "")).rstrip("/")
         self._key = key or os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
@@ -445,6 +447,9 @@ class SupabaseCrawlRunStore:
         self._owns_client = client is None
         self._governor = governor
         self._clock = clock or (lambda: datetime.now(timezone.utc))
+        if heartbeat_interval_seconds <= 0:
+            raise ValueError("Heartbeat interval must be positive.")
+        self._heartbeat_interval_seconds = heartbeat_interval_seconds
         self._cache = (
             cache
             if cache is not None
@@ -598,7 +603,9 @@ class SupabaseCrawlRunStore:
                 recovered, owner_token, owner_version
             ),
         )
-        run.task = asyncio.create_task(run.start(transport))
+        run.task = asyncio.create_task(
+            self._run_owned(run, transport, owner_token, owner_version)
+        )
         self._runs[run_id] = run
         return run
 
@@ -726,7 +733,9 @@ class SupabaseCrawlRunStore:
                 recovered, owner_token, owner_version
             ),
         )
-        run.task = asyncio.create_task(run.start(transport))
+        run.task = asyncio.create_task(
+            self._run_owned(run, transport, owner_token, owner_version)
+        )
         self._runs[run_id] = run
         return run
 
@@ -736,6 +745,50 @@ class SupabaseCrawlRunStore:
         self._fenced_update(
             run_id, token, version, "progress", {"progress": _progress_json(progress)}
         )
+
+    async def _run_owned(
+        self,
+        run: CrawlRun,
+        transport: httpx.AsyncBaseTransport | None,
+        token: str,
+        version: int,
+    ) -> None:
+        acquisition = asyncio.create_task(run.start(transport))
+        heartbeat = asyncio.create_task(
+            self._heartbeat_loop(run.id, token, version, acquisition)
+        )
+        try:
+            await acquisition
+        finally:
+            if not acquisition.done():
+                acquisition.cancel()
+                await asyncio.gather(acquisition, return_exceptions=True)
+            heartbeat.cancel()
+            await asyncio.gather(heartbeat, return_exceptions=True)
+
+    async def _heartbeat_loop(
+        self, run_id: str, token: str, version: int, acquisition: asyncio.Task[None]
+    ) -> None:
+        while True:
+            await asyncio.sleep(self._heartbeat_interval_seconds)
+            try:
+                renewed = await asyncio.to_thread(
+                    self._rpc_boolean,
+                    "heartbeat_crawl_run",
+                    {
+                        "p_run_id": run_id,
+                        "p_owner_token": token,
+                        "p_owner_version": version,
+                    },
+                )
+            except Exception:
+                renewed = False
+            if not renewed:
+                run = self._runs.get(run_id)
+                if run is not None:
+                    run._ownership_lost = True
+                acquisition.cancel()
+                return
 
     def _save_checkpoint(
         self, run_id: str, token: str, version: int, checkpoint: CrawlCheckpoint

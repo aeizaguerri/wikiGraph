@@ -22,6 +22,7 @@ class PostgrestRuns:
 
     def __init__(self) -> None:
         self.rows: dict[str, dict[str, object]] = {}
+        self.heartbeats = 0
 
     def transport(self) -> httpx.MockTransport:
         return httpx.MockTransport(self.handle)
@@ -46,6 +47,12 @@ class PostgrestRuns:
                 return httpx.Response(200, json=[])
             row.update(status="running", owner_token=args["p_owner_token"], owner_version=row["owner_version"] + 1)
             return httpx.Response(200, json=[{"owner_version": row["owner_version"]}])
+        if request.url.path.endswith("/rpc/heartbeat_crawl_run"):
+            self.heartbeats += 1
+            args = json.loads(request.content)
+            row = self.rows.get(args["p_run_id"])
+            owned = bool(row and row.get("owner_token") == args["p_owner_token"] and row.get("owner_version") == args["p_owner_version"] and row.get("status") == "running")
+            return httpx.Response(200, json=owned)
         if request.url.path.endswith("/rpc/fenced_update_crawl_run"):
             args = json.loads(request.content)
             row = self.rows.get(args["p_run_id"])
@@ -187,6 +194,58 @@ async def test_active_progress_is_persisted_before_terminal_sse(
                 raise AssertionError("run did not reach persisted completion")
 
     assert database.rows[run_id]["status"] == "completed"
+
+
+async def test_long_owned_acquisition_keeps_lease_renewed(
+    stub: FakeMediaWiki,
+) -> None:
+    stub.add_page("Hub")
+    gate = stub.gate("Hub")
+    database = PostgrestRuns()
+    store = SupabaseCrawlRunStore(
+        "https://supabase.test", "server-only-test-key",
+        client=httpx.Client(transport=database.transport()),
+        heartbeat_interval_seconds=0.01,
+    )
+    run = store.start_run(CrawlRequest("Hub", 1, "es"), stub.transport)
+    for _ in range(100):
+        if database.heartbeats >= 2:
+            break
+        await asyncio.sleep(0.01)
+    else:
+        raise AssertionError("owned crawl did not renew its lease while acquisition waited")
+    assert database.rows[run.id]["status"] == "running"
+    gate.set()
+    await asyncio.wait_for(run.wait_done(), 1)
+    assert database.rows[run.id]["status"] == "completed"
+    await store.shutdown()
+
+
+async def test_failed_heartbeat_cancels_acquisition_without_publishing_graph(
+    stub: FakeMediaWiki,
+) -> None:
+    stub.add_page("Hub")
+    gate = stub.gate("Hub")
+
+    def heartbeat_fails(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/rpc/create_owned_crawl_run"):
+            args = json.loads(request.content)
+            return httpx.Response(200, json=[{"run_id": args["p_run_id"], "owner_version": 1}])
+        if request.url.path.endswith("/rpc/heartbeat_crawl_run"):
+            return httpx.Response(200, json=False)
+        return httpx.Response(200, json=True)
+
+    store = SupabaseCrawlRunStore(
+        "https://supabase.test", "server-only-test-key",
+        client=httpx.Client(transport=httpx.MockTransport(heartbeat_fails)),
+        heartbeat_interval_seconds=0.01,
+    )
+    run = store.start_run(CrawlRequest("Hub", 1, "es"), stub.transport)
+    await asyncio.wait_for(run.wait_done(), 1)
+    assert run.result is None
+    assert run.communities is None
+    assert run.status.value == "recoverable"
+    await store.shutdown()
 
 
 async def test_missing_update_row_is_reported_as_persistence_failure(
