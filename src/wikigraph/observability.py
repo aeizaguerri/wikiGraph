@@ -9,6 +9,7 @@ from typing import Any
 
 
 logger = logging.getLogger("wikigraph.observability")
+logger.setLevel(logging.INFO)
 
 
 def emit(event: str, **fields: Any) -> None:

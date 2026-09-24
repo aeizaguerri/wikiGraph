@@ -12,6 +12,8 @@ from typing import Any, Callable, Protocol
 
 import httpx
 
+from wikigraph.observability import emit
+
 FRESHNESS_SECONDS = 7 * 24 * 60 * 60
 CACHE_SCHEMA_VERSION = "1"
 
@@ -176,6 +178,13 @@ class SupabaseResponseCache:
             params={"on_conflict": "cache_key"},
             json=self._row(key, response),
         )
+        if result.is_error:
+            emit(
+                "upstream_cache_write_failure",
+                edition=key.edition,
+                kind=key.kind,
+                status_code=result.status_code,
+            )
         result.raise_for_status()
 
     def close(self) -> None:
