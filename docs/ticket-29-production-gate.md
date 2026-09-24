@@ -81,12 +81,42 @@ observability, not exposed by this CLI invocation.
 To close that instrumentation gap, this branch adds secret-free structured
 events for Wikimedia attempts, cache lookups, completion timing/process usage,
 and persistence writes in commit
-`ec7dc3d517bb87a1f76da6a360bc6e8096840d3d`. The
+`ec7dc3d517bb87a1f76da6a360bc6e8096840d3d`. The deployed revision did not
+emit them because its logger level remained above INFO. Commit
+`534edc7f72574e4ed7416113531aa150070e2a95` fixes that and also emits a
+secret-free cache-write failure event. Neither commit has been deployed by this
+agent.
 The deployed service is still the earlier commit above, so this is local code
 evidence only. It requires an explicitly authorized Render deployment of that
 commit (and no deployment was performed here) before a production benchmark can
 consume the new events. Render CPU/memory still requires the service Metrics
 view/API after deployment.
+
+## Actual controlled benchmark attempt
+
+At `2026-09-24T18:55:13.661279Z`, after confirming no active `/api/runs` work in
+the Render log window, one cold English run was launched directly against the
+deployed Render API:
+
+```text
+POST /api/runs {seed: Argentina, language: en, depth: 3, node_cap: 2500}
+run_id: OQcbAZxXolU_ueD6uTIENGUEhueNNrDR
+SSE: HTTP 200
+terminal: 2026-09-24T19:07:33.412806Z, duration 739.751527 seconds
+progress: crawled 1/discovered 1 -> 1/1594 -> 51/1594 -> 51/2500 -> 101/2500
+terminal state: failed, crawled 101, discovered 2500, current depth 2
+Graph: HTTP 409, no completed Graph
+failure: POST /rest/v1/upstream_response_cache?on_conflict=cache_key returned HTTP 500
+```
+
+This is an actual failed production attempt, not a benchmark pass. No request,
+continuation, cache-hit, retry-delay, fairness, process CPU/RSS, Render CPU/
+memory, or persistence-effect metrics were recorded because the deployed
+structured logger emitted no events. The failure is isolated to the cache write
+path as reported by the run; it is not evidence of a hosted Supabase outage,
+and no outage was induced. Do not repeat another heavy run until the cache-500
+response is diagnosed through the deployed instrumentation or an approved
+read-only Supabase/Render diagnostic.
 
 No blind production 2,500-Article load, restart, fault injection, or claim of
 Render CPU/memory was made. A maintainer with those exact permissions must
