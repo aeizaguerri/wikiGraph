@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
 from typing import Any
 
+import asyncio
 import httpx
 
 from wikigraph.governor import (
@@ -23,6 +24,7 @@ from wikigraph.response_cache import (
     InMemoryResponseCache,
     ResponseCache,
     ResponseCacheKey,
+    SupabaseResponseCache,
     continuation_identity,
     normalized_titles,
 )
@@ -277,7 +279,10 @@ class MediaWikiClient:
     async def _cached_get(
         self, params: dict[str, str], key: ResponseCacheKey
     ) -> dict[str, Any]:
-        cached = self._cache.get(key)
+        if isinstance(self._cache, SupabaseResponseCache):
+            cached = await asyncio.to_thread(self._cache.get, key)
+        else:
+            cached = self._cache.get(key)
         emit(
             "upstream_cache_lookup",
             owner=self._owner,
@@ -290,7 +295,10 @@ class MediaWikiClient:
             return cached
         body = await self._get(params)
         if not self._last_request_had_overload:
-            self._cache.put(key, body)
+            if isinstance(self._cache, SupabaseResponseCache):
+                await asyncio.to_thread(self._cache.put, key, body)
+            else:
+                self._cache.put(key, body)
         return body
 
     async def aclose(self) -> None:

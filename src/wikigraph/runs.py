@@ -35,6 +35,16 @@ from wikigraph.mediawiki import UpstreamOverload
 from wikigraph.observability import emit, process_usage
 
 
+async def _persist_off_loop(operation: Callable[[], None]) -> None:
+    """Run a durable write off-loop and settle it before propagating cancellation."""
+    task = asyncio.create_task(asyncio.to_thread(operation))
+    try:
+        await asyncio.shield(task)
+    except asyncio.CancelledError:
+        await task
+        raise
+
+
 class RunStatus(str, Enum):
     RUNNING = "running"
     OVERLOAD_WAITING = "overload_waiting"
@@ -147,8 +157,9 @@ class CrawlRun:
             )
             self.truncated = result.truncated
             self.status = RunStatus.COMPLETED
-            if self._persist_completion is not None:
-                self._persist_completion(self)
+            persist_completion = self._persist_completion
+            if persist_completion is not None:
+                await _persist_off_loop(lambda: persist_completion(self))
             emit(
                 "crawl_run_complete",
                 run_id=self.id,
@@ -171,8 +182,10 @@ class CrawlRun:
                 "attempts": exc.attempts,
                 "retry_after": exc.retry_after,
             }
-            if self._persist_recovery is not None:
-                self._persist_recovery(self)
+            persist_recovery = self._persist_recovery
+            if persist_recovery is not None:
+                callback = persist_recovery
+                await _persist_off_loop(lambda: callback(self))
             self.publish(
                 RunEvent(
                     OVERLOAD_WAITING_EVENT,
@@ -182,16 +195,18 @@ class CrawlRun:
         except asyncio.CancelledError:
             self.status = RunStatus.RECOVERABLE
             self.error = "The crawl process was interrupted; retry to resume."
-            if self._persist_recovery is not None and not self._ownership_lost:
-                self._persist_recovery(self)
+            persist_recovery = self._persist_recovery
+            if persist_recovery is not None and not self._ownership_lost:
+                await _persist_off_loop(lambda: persist_recovery(self))
             self.publish(RunEvent(RECOVERABLE_EVENT, {"error": self.error}))
             raise
         except Exception as exc:
             self.status = RunStatus.FAILED
             self.error = str(exc)
-            if self._persist_failure is not None:
+            persist_failure = self._persist_failure
+            if persist_failure is not None:
                 try:
-                    self._persist_failure(self)
+                    await _persist_off_loop(lambda: persist_failure(self))
                 except PersistenceError:
                     # The local terminal event still tells an attached client
                     # that this operation failed; the store remains canonical
@@ -203,8 +218,9 @@ class CrawlRun:
 
     async def _record_progress(self, progress: Progress) -> None:
         self.progress = _progress_json(progress)
-        if self._persist_progress is not None:
-            self._persist_progress(progress)
+        persist_progress = self._persist_progress
+        if persist_progress is not None:
+            await _persist_off_loop(lambda: persist_progress(progress))
         self.publish(
             RunEvent(
                 PROGRESS_EVENT,
@@ -219,8 +235,9 @@ class CrawlRun:
 
     async def _record_checkpoint(self, checkpoint: CrawlCheckpoint) -> None:
         self._checkpoint = checkpoint
-        if self._persist_checkpoint is not None:
-            self._persist_checkpoint(checkpoint)
+        persist_checkpoint = self._persist_checkpoint
+        if persist_checkpoint is not None:
+            await _persist_off_loop(lambda: persist_checkpoint(checkpoint))
 
 
 class CrawlRunHandle(Protocol):
@@ -489,11 +506,17 @@ class SupabaseCrawlRunStore:
         return headers
 
     def healthcheck(self) -> None:
-        """Verify the runtime schema and the RPCs used by production."""
+        """Verify the canonical persisted-run contract with one bounded query."""
         self._request(
             "GET",
             headers=self._headers(),
-            params={"select": "run_id", "limit": "1"},
+            params={"select": "run_id,owner_token,owner_version,checkpoint", "limit": "1"},
+        )
+
+    def validate_runtime_schema(self) -> None:
+        """Verify every table and RPC required by the runtime at startup."""
+        self._request(
+            "GET", headers=self._headers(), params={"select": "run_id", "limit": "1"}
         )
         for table in (
             "crawl_launch_admission",

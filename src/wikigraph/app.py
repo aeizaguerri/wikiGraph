@@ -281,7 +281,10 @@ def create_app(
         if require_production_config:
             validate_production_configuration()
             try:
-                store.healthcheck()
+                if isinstance(store, SupabaseCrawlRunStore):
+                    store.validate_runtime_schema()
+                else:
+                    store.healthcheck()
                 store.cleanup_expired()
             except PersistenceError as exc:
                 raise RuntimeError("Canonical Supabase persistence is unavailable.") from exc
@@ -323,7 +326,7 @@ def create_app(
     @app.get("/readyz")
     async def readiness() -> dict[str, str]:
         try:
-            store.healthcheck()
+            await asyncio.to_thread(store.healthcheck)
         except PersistenceError as exc:
             raise _error(503, "persistence_unavailable", str(exc)) from exc
         return {
