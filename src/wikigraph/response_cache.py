@@ -8,7 +8,7 @@ import time
 from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, Protocol, cast
 
 import httpx
 
@@ -16,6 +16,10 @@ from wikigraph.observability import emit
 
 FRESHNESS_SECONDS = 7 * 24 * 60 * 60
 CACHE_SCHEMA_VERSION = "1"
+
+
+class _TransientCacheFailure(Exception):
+    """A disposable cache operation failed without affecting crawl work."""
 
 
 @dataclass(frozen=True)
@@ -100,7 +104,7 @@ class SupabaseResponseCache:
         self._key = key
         self._rest_path = rest_path.strip("/")
         self.capacity = capacity
-        self._client = client or httpx.Client(timeout=20.0)
+        self._client = client or httpx.Client(timeout=3.0)
         self._owns_client = client is None
 
     @property
@@ -141,51 +145,96 @@ class SupabaseResponseCache:
             "last_accessed_at": now.isoformat(),
         }
 
-    def get(self, key: ResponseCacheKey) -> dict[str, Any] | None:
-        response = self._client.get(
-            self._endpoint,
-            headers=self._headers(),
-            params={"cache_key": f"eq.{self._digest(key)}", "limit": "1"},
+    @staticmethod
+    def _transient_failure(
+        key: ResponseCacheKey, operation: str, failure: Exception
+    ) -> bool:
+        status_code = (
+            failure.response.status_code
+            if isinstance(failure, httpx.HTTPStatusError)
+            else None
         )
-        response.raise_for_status()
+        if status_code is not None and status_code < 500:
+            return False
+        if status_code is None and not isinstance(failure, httpx.RequestError):
+            return False
+        emit(
+            "upstream_cache_transient_failure",
+            kind=key.kind,
+            edition=key.edition,
+            operation=operation,
+            exception_class=type(failure).__name__,
+            status_code=status_code,
+        )
+        return True
+
+    def _request(
+        self, operation: str, key: ResponseCacheKey, **kwargs: Any
+    ) -> httpx.Response:
+        try:
+            response = cast(
+                httpx.Response,
+                getattr(self._client, operation)(self._endpoint, **kwargs),
+            )
+            response.raise_for_status()
+            return response
+        except (httpx.RequestError, httpx.HTTPStatusError) as exc:
+            if self._transient_failure(key, operation, exc):
+                raise _TransientCacheFailure from exc
+            raise
+
+    def get(self, key: ResponseCacheKey) -> dict[str, Any] | None:
+        try:
+            response = self._request(
+                "get",
+                key,
+                headers=self._headers(),
+                params={"cache_key": f"eq.{self._digest(key)}", "limit": "1"},
+            )
+        except _TransientCacheFailure:
+            return None
         rows = response.json()
         if not rows:
             return None
         row = rows[0]
         expires_at = datetime.fromisoformat(str(row["expires_at"])).timestamp()
         if time.time() >= expires_at:
-            self._client.delete(
-                self._endpoint,
+            try:
+                self._request(
+                    "delete",
+                    key,
+                    headers=self._headers(),
+                    params={"cache_key": f"eq.{self._digest(key)}"},
+                )
+            except _TransientCacheFailure:
+                pass
+            return None
+        try:
+            self._request(
+                "patch",
+                key,
                 headers=self._headers(),
                 params={"cache_key": f"eq.{self._digest(key)}"},
-            ).raise_for_status()
+                json={"last_accessed_at": datetime.now(timezone.utc).isoformat()},
+            )
+        except _TransientCacheFailure:
             return None
-        self._client.patch(
-            self._endpoint,
-            headers=self._headers(),
-            params={"cache_key": f"eq.{self._digest(key)}"},
-            json={"last_accessed_at": datetime.now(timezone.utc).isoformat()},
-        ).raise_for_status()
         response_body = row["response"]
         if not isinstance(response_body, dict):
             raise ValueError("cached response must be a JSON object")
         return response_body
 
     def put(self, key: ResponseCacheKey, response: dict[str, Any]) -> None:
-        result = self._client.post(
-            self._endpoint,
-            headers=self._headers(representation=True),
-            params={"on_conflict": "cache_key"},
-            json=self._row(key, response),
-        )
-        if result.is_error:
-            emit(
-                "upstream_cache_write_failure",
-                edition=key.edition,
-                kind=key.kind,
-                status_code=result.status_code,
+        try:
+            self._request(
+                "post",
+                key,
+                headers=self._headers(representation=True),
+                params={"on_conflict": "cache_key"},
+                json=self._row(key, response),
             )
-        result.raise_for_status()
+        except _TransientCacheFailure:
+            return
 
     def close(self) -> None:
         if self._owns_client:
