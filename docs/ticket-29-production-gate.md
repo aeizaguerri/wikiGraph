@@ -41,8 +41,27 @@ report so missing evidence is reviewable.
 
 The local benchmark's `simulated_time` is 654.5 seconds. It is not a wall-clock
 completion measurement. It has no Render CPU, Render memory, cache-hit,
-retry-delay, or Supabase persistence telemetry, so the 2,500-Article benchmark
-criterion remains incomplete rather than being promoted to production proof.
+retry-delay, or Supabase persistence telemetry.
+
+## Performance objective and bounded evidence
+
+The accepted objective is approximately two minutes for a representative
+2,500-node run with a warm cache. One bounded warm-cache sample reached a
+2,500-node cap, with 5,033 edges and 51 source Articles crawled, in 99.223
+seconds; it met the approximate 120-second objective in that sample. This does
+not establish repeatability or generalize to representative workloads. Cold
+runs may take longer, but their duration must be measured and communicated
+explicitly rather than inferred from a warm-cache result. The current
+deterministic cold fixture requires 1,304 upstream attempts, implying at least
+652 seconds at the unchanged two-starts-per-second limit, before network and
+persistence overhead; this is a theoretical lower bound, not a wall-clock or
+deployed cold-run proof. The sample also provides no cold-performance or
+deployed fairness proof.
+
+Every warm and cold run remains subject to the global Wikimedia governor:
+maximum 1 in-flight request, 2 request starts per second, and 120 attempts per
+minute. The warm-cache objective does not authorize relaxing any of these
+limits.
 
 ## Criterion state
 
@@ -51,7 +70,7 @@ criterion remains incomplete rather than being promoted to production proof.
 | Spanish and English deployed runs | **bounded fresh-browser/SSE smoke proven; full criterion pending** | Cloudflare browser launch ES `NKDKCoZB-w8tbAE_5hLy45MCVgjg2vdl` and EN `x2RzjHZVZ0FRKG4swOK3SC6D9oY38s7P`, both depth 1/node cap 20; each received `/events` HTTP 200, reached Ready with 1 crawled/20 discovered, Graph HTTP 200, and same-URL reload reopened Ready. This is not the required 2,500 acceptance run. |
 | Reopen and seven-day retention | **bounded browser reopen proven; retention pending** | The two browser run URLs reopened immediately through Cloudflare; seven-day elapsed/controlled retention evidence is still absent. |
 | Render restart checkpoint recovery | **pending** | Requires an operator-coordinated restart and same-run manual retry receipt. |
-| Representative 2,500-Article benchmark | **incomplete** | Local shape and governor limits are proven; deployed timing/upstream/continuation/cache/retry/fairness/CPU/memory/persistence metrics are absent. |
+| Representative 2,500-Article benchmark | **incomplete** | One warm sample met the approximate 120-second objective: a 2,500-node-capped graph with 5,033 edges and 51 source Articles crawled completed in 99.223 seconds. This does not prove repeatability or representative workload generalization. The 1,304-attempt cold fixture gives only a >=652-second theoretical floor at unchanged governor limits, not cold performance proof. Deployed timing/upstream/continuation/cache/retry/fairness/CPU/memory/persistence metrics and broader workload evidence remain absent. |
 | Concurrent global budget and fairness | **local-only** | Deterministic local governor proves 1 in-flight, 2 starts/second, 120 attempts/minute and alternating owners; cross-process deployed evidence is pending. |
 | Injected 429/503/maxlag recovery | **pending** | Must use an isolated harness or approved seam, never real Wikimedia traffic. |
 | Supabase failure fail-closed and retention | **live-probe-only** | `/readyz` was healthy; controlled availability failure and seven-day boundary evidence are pending. |
