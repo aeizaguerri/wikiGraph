@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 import os
+import subprocess
 import uuid
 
 import httpx
@@ -15,9 +16,10 @@ from wikigraph.runs import SupabaseCrawlRunStore
 
 POSTGREST_URL = os.environ.get("WIKIGRAPH_TICKET26_POSTGREST_URL")
 POSTGREST_KEY = os.environ.get("WIKIGRAPH_TICKET26_POSTGREST_KEY")
+LOCAL_PSQL_ENABLED = os.environ.get("WIKIGRAPH_TICKET26_LOCAL_PSQL") == "1"
 pytestmark = pytest.mark.skipif(
-    not POSTGREST_URL or not POSTGREST_KEY,
-    reason="ticket26 local PostgREST service is not configured",
+    not POSTGREST_URL or not POSTGREST_KEY or not LOCAL_PSQL_ENABLED,
+    reason="ticket26 local PostgREST service and local psql fixture opt-in are required",
 )
 
 
@@ -31,6 +33,52 @@ def _headers() -> dict[str, str]:
     }
 
 
+def _seed_historical_runs(completed_id: str, incomplete_id: str) -> None:
+    """Seed fixture rows through the isolated local database admin connection."""
+    sql = f"""
+        INSERT INTO public.crawl_runs
+            (run_id, seed, language, depth, node_cap, status, progress, checkpoint,
+             graph, completed_at, expires_at, error)
+        VALUES
+            ('{completed_id}', 'Finished', 'en', 1, 500, 'completed',
+             '{{"crawled":1,"discovered":1}}'::jsonb,
+             '{{"secret":"checkpoint"}}'::jsonb,
+             '{{"nodes":[{{"title":"Finished","level":0,"is_seed":true}}],"edges":[],"truncated":false,"crawled":1,"discovered":1,"community_ids":{{"Finished":0}},"community_count":1,"modularity":0.0}}'::jsonb,
+             '2026-09-15T12:00:00Z', '2026-09-22T12:00:00Z', NULL),
+            ('{incomplete_id}', 'Interrupted', 'en', 1, 500, 'recoverable',
+             '{{"crawled":1,"discovered":2}}'::jsonb,
+             '{{"secret":"checkpoint"}}'::jsonb,
+             NULL, NULL, '2026-09-23T12:00:00Z', 'interrupted');
+    """
+    subprocess.run(
+        [
+            "podman", "exec", "-i", "ticket28-postgres", "psql", "-X",
+            "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "wikigraph",
+        ],
+        input=sql,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+
+
+def _delete_historical_runs(completed_id: str, incomplete_id: str) -> None:
+    sql = (
+        "DELETE FROM public.crawl_runs "
+        f"WHERE run_id IN ('{completed_id}', '{incomplete_id}');"
+    )
+    subprocess.run(
+        [
+            "podman", "exec", "-i", "ticket28-postgres", "psql", "-X",
+            "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "wikigraph",
+        ],
+        input=sql,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+
+
 async def test_cleanup_preserves_tombstones_metrics_and_independent_cache() -> None:
     assert POSTGREST_URL is not None
     now = datetime(2026, 9, 22, 12, tzinfo=timezone.utc)
@@ -39,46 +87,7 @@ async def test_cleanup_preserves_tombstones_metrics_and_independent_cache() -> N
     cache_key = uuid.uuid4().hex
     database = httpx.Client(timeout=10.0)
     try:
-        for row in (
-            {
-                "run_id": completed_id,
-                "seed": "Finished",
-                "language": "en",
-                "depth": 1,
-                "node_cap": 500,
-                "status": "completed",
-                "progress": {"crawled": 1, "discovered": 1},
-                "checkpoint": {"secret": "checkpoint"},
-                "graph": {
-                    "nodes": [{"title": "Finished", "level": 0, "is_seed": True}],
-                    "edges": [],
-                    "truncated": False,
-                    "crawled": 1,
-                    "discovered": 1,
-                    "community_ids": {"Finished": 0},
-                    "community_count": 1,
-                    "modularity": 0.0,
-                },
-                "completed_at": "2026-09-15T12:00:00Z",
-                "expires_at": "2026-09-22T12:00:00Z",
-            },
-            {
-                "run_id": incomplete_id,
-                "seed": "Interrupted",
-                "language": "en",
-                "depth": 1,
-                "node_cap": 500,
-                "status": "recoverable",
-                "progress": {"crawled": 1, "discovered": 2},
-                "checkpoint": {"secret": "checkpoint"},
-                "error": "interrupted",
-                "expires_at": "2026-09-23T12:00:00Z",
-            },
-        ):
-            response = database.post(
-                f"{POSTGREST_URL}/crawl_runs", headers=_headers(), json=row
-            )
-            response.raise_for_status()
+        _seed_historical_runs(completed_id, incomplete_id)
         cache = {
             "cache_key": cache_key,
             "kind": "redirects",
@@ -156,11 +165,7 @@ async def test_cleanup_preserves_tombstones_metrics_and_independent_cache() -> N
         assert by_day["2026-09-22"] == existing_metrics.get("2026-09-22", 0) + 1
         assert by_day["2026-09-23"] == existing_metrics.get("2026-09-23", 0) + 1
     finally:
-        database.delete(
-            f"{POSTGREST_URL}/crawl_runs",
-            params={"run_id": f"in.({completed_id},{incomplete_id})"},
-            headers=_headers(),
-        )
+        _delete_historical_runs(completed_id, incomplete_id)
         database.delete(
             f"{POSTGREST_URL}/upstream_response_cache",
             params={"cache_key": f"eq.{cache_key}"},
