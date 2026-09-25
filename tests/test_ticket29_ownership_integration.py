@@ -7,6 +7,7 @@ uv run pytest tests/test_ticket29_ownership_integration.py -q
 
 from __future__ import annotations
 
+import asyncio
 import concurrent.futures
 import os
 import subprocess
@@ -14,6 +15,10 @@ import uuid
 
 import httpx
 import pytest
+
+from tests.stub import FakeMediaWiki
+from wikigraph.crawler import CrawlRequest
+from wikigraph.runs import RunStatus, SupabaseCrawlRunStore
 
 URL = os.environ.get("WIKIGRAPH_TICKET28_POSTGREST_URL")
 JWT = os.environ.get("WIKIGRAPH_TICKET28_SERVICE_ROLE_JWT")
@@ -72,7 +77,10 @@ def test_owned_run_claim_race_heartbeat_fencing_and_direct_patch_denial() -> Non
         "p_run_id": run_id, "p_owner_token": token,
         "p_owner_version": version, "p_lease_seconds": 120,
     })
-    assert heartbeat.status_code == 200 and heartbeat.json()
+    assert heartbeat.status_code == 200
+    assert isinstance(heartbeat.json(), list)
+    assert len(heartbeat.json()) == 1
+    assert isinstance(heartbeat.json()[0]["lease_until"], str)
     assert _sql(f"select lease_until > clock_timestamp() from public.crawl_runs where run_id='{run_id}'") == "t"
 
     # Only this isolated test row is made expired using the trusted local psql role.
@@ -87,7 +95,6 @@ def test_owned_run_claim_race_heartbeat_fencing_and_direct_patch_denial() -> Non
     })
     assert stale.status_code == 200 and stale.json() is False
     assert _sql(f"select status from public.crawl_runs where run_id='{run_id}'") == "recoverable"
-
     raw = httpx.patch(f"{URL}/crawl_runs", headers=_headers(), params={"run_id": f"eq.{run_id}"}, json={"status": "completed"}, timeout=10)
     assert raw.status_code in {401, 403}
     raw_insert = httpx.post(f"{URL}/crawl_runs", headers=_headers(), json={
@@ -96,6 +103,50 @@ def test_owned_run_claim_race_heartbeat_fencing_and_direct_patch_denial() -> Non
         "progress": {}, "checkpoint": {},
     }, timeout=10)
     assert raw_insert.status_code in {401, 403}
+
+
+async def test_heartbeat_loop_accepts_postgrest_row_and_keeps_acquisition_owned() -> None:
+    assert URL is not None and JWT is not None
+    stub = FakeMediaWiki()
+    stub.add_page("Heartbeat shape")
+    gate = stub.gate("Heartbeat shape")
+    store = SupabaseCrawlRunStore(
+        URL, JWT, rest_path="", heartbeat_interval_seconds=0.02
+    )
+    run = store.start_run(CrawlRequest("Heartbeat shape", 1, "en"), stub.transport)
+    try:
+        initial_lease = _sql(
+            f"select lease_until::text from public.crawl_runs where run_id='{run.id}'"
+        )
+        await asyncio.sleep(0.1)
+        renewed_lease = _sql(
+            f"select lease_until::text from public.crawl_runs where run_id='{run.id}'"
+        )
+        assert renewed_lease != initial_lease
+        assert run.status is RunStatus.RUNNING
+        assert run.task is not None and not run.task.done()
+    finally:
+        gate.set()
+        await store.shutdown()
+        _sql(f"delete from public.crawl_runs where run_id='{run.id}'")
+
+
+def test_stale_heartbeat_has_empty_postgrest_result() -> None:
+    run_id, token, version = _new_run()
+    _sql(
+        f"update public.crawl_runs set lease_until=clock_timestamp()-interval '1 second' where run_id='{run_id}'"
+    )
+
+    response = _rpc("heartbeat_crawl_run", {
+        "p_run_id": run_id,
+        "p_owner_token": token,
+        "p_owner_version": version,
+        "p_lease_seconds": 90,
+    })
+
+    assert response.status_code == 200
+    assert response.json() == []
+    _sql(f"delete from public.crawl_runs where run_id='{run_id}'")
 
 
 @pytest.mark.parametrize("operation,patch", [

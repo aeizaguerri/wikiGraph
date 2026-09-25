@@ -52,7 +52,9 @@ class PostgrestRuns:
             args = json.loads(request.content)
             row = self.rows.get(args["p_run_id"])
             owned = bool(row and row.get("owner_token") == args["p_owner_token"] and row.get("owner_version") == args["p_owner_version"] and row.get("status") == "running")
-            return httpx.Response(200, json=owned)
+            return httpx.Response(
+                200, json=[{"lease_until": "2026-09-25T00:00:00+00:00"}] if owned else []
+            )
         if request.url.path.endswith("/rpc/fenced_update_crawl_run"):
             args = json.loads(request.content)
             row = self.rows.get(args["p_run_id"])
@@ -232,7 +234,7 @@ async def test_failed_heartbeat_cancels_acquisition_without_publishing_graph(
             args = json.loads(request.content)
             return httpx.Response(200, json=[{"run_id": args["p_run_id"], "owner_version": 1}])
         if request.url.path.endswith("/rpc/heartbeat_crawl_run"):
-            return httpx.Response(200, json=False)
+            return httpx.Response(200, json=[])
         return httpx.Response(200, json=True)
 
     store = SupabaseCrawlRunStore(

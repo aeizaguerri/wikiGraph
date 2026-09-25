@@ -571,6 +571,35 @@ class SupabaseCrawlRunStore:
             raise PersistenceError("Supabase returned an invalid run update result.")
         return value
 
+    def _rpc_heartbeat(self, payload: dict[str, Any]) -> bool:
+        endpoint = self._rest_endpoint("rpc/heartbeat_crawl_run")
+        try:
+            response = self._client.post(endpoint, headers=self._headers(), json=payload)
+            response.raise_for_status()
+            value = response.json()
+        except (httpx.HTTPError, OSError, ValueError) as exc:
+            raise PersistenceError("Supabase persistence operation failed.") from exc
+        if value == []:
+            return False
+        if (
+            isinstance(value, list)
+            and len(value) == 1
+            and isinstance(value[0], dict)
+            and isinstance(value[0].get("lease_until"), str)
+        ):
+            try:
+                lease_until = datetime.fromisoformat(
+                    value[0]["lease_until"].replace("Z", "+00:00")
+                )
+            except ValueError as exc:
+                raise PersistenceError(
+                    "Supabase returned an invalid heartbeat result."
+                ) from exc
+            if lease_until.tzinfo is None:
+                raise PersistenceError("Supabase returned an invalid heartbeat result.")
+            return True
+        raise PersistenceError("Supabase returned an invalid heartbeat result.")
+
     def _request(self, method: str, **kwargs: Any) -> list[dict[str, Any]]:
         return self._request_url(self._endpoint, method, **kwargs)
 
@@ -848,8 +877,7 @@ class SupabaseCrawlRunStore:
             await asyncio.sleep(self._heartbeat_interval_seconds)
             try:
                 renewed = await asyncio.to_thread(
-                    self._rpc_boolean,
-                    "heartbeat_crawl_run",
+                    self._rpc_heartbeat,
                     {
                         "p_run_id": run_id,
                         "p_owner_token": token,
