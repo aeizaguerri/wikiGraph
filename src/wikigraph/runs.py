@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Callable, Protocol
 
+import json
 import httpx
 
 from wikigraph.communities import CommunityAssignment, detect_communities
@@ -561,15 +562,46 @@ class SupabaseCrawlRunStore:
 
     def _rpc_boolean(self, function: str, payload: dict[str, Any]) -> bool:
         endpoint = self._rest_endpoint(f"rpc/{function}")
+        started = time.perf_counter()
+        response: httpx.Response | None = None
+        operation = str(payload.get("p_operation", function))
+        run_id = payload.get("p_run_id")
+        payload_bytes = len(json.dumps(payload, separators=(",", ":")).encode())
         try:
             response = self._client.post(endpoint, headers=self._headers(), json=payload)
             response.raise_for_status()
             value = response.json()
         except (httpx.HTTPError, OSError, ValueError) as exc:
+            self._emit_persistence_write_failure(
+                operation, run_id, payload_bytes, started, exc, response
+            )
             raise PersistenceError("Supabase persistence operation failed.") from exc
         if not isinstance(value, bool):
+            invalid_result = ValueError("invalid run update result")
+            self._emit_persistence_write_failure(
+                operation, run_id, payload_bytes, started, invalid_result, response
+            )
             raise PersistenceError("Supabase returned an invalid run update result.")
         return value
+
+    @staticmethod
+    def _emit_persistence_write_failure(
+        operation: str,
+        run_id: Any,
+        payload_bytes: int,
+        started: float,
+        exc: Exception,
+        response: httpx.Response | None,
+    ) -> None:
+        emit(
+            "persistence_write_failure",
+            operation=operation,
+            duration_ms=round((time.perf_counter() - started) * 1000, 3),
+            payload_bytes=payload_bytes,
+            exception_class=type(exc).__name__,
+            http_status_code=response.status_code if response is not None else None,
+            run_id=run_id,
+        )
 
     def _rpc_heartbeat(self, payload: dict[str, Any]) -> bool:
         endpoint = self._rest_endpoint("rpc/heartbeat_crawl_run")

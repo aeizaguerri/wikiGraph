@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import httpx
 import pytest
@@ -54,6 +56,104 @@ def test_supabase_healthcheck_fails_closed() -> None:
 
     with pytest.raises(PersistenceError, match="persistence operation failed"):
         store.healthcheck()
+
+
+def test_fenced_update_failure_emits_secret_free_operation_diagnostics(caplog) -> None:
+    class FailedWriteClient:
+        def post(self, url: str, **kwargs: object) -> httpx.Response:
+            return httpx.Response(
+                500,
+                request=httpx.Request("POST", url),
+                text="sensitive database detail",
+            )
+
+    store = SupabaseCrawlRunStore(
+        "https://db.example", "authorization-secret", client=FailedWriteClient()
+    )
+    payload = {
+        "p_run_id": "opaque-run-id",
+        "p_owner_token": "private-owner-token",
+        "p_owner_version": 1,
+        "p_operation": "checkpoint",
+        "p_patch": {"checkpoint": {"title": "private title"}},
+    }
+
+    with pytest.raises(PersistenceError, match="persistence operation failed"):
+        store._rpc_boolean("fenced_update_crawl_run", payload)
+
+    event = json.loads(caplog.records[-1].message)
+    assert event == {
+        "event": "persistence_write_failure",
+        "operation": "checkpoint",
+        "duration_ms": event["duration_ms"],
+        "payload_bytes": len(json.dumps(payload, separators=(",", ":")).encode()),
+        "exception_class": "HTTPStatusError",
+        "http_status_code": 500,
+        "run_id": "opaque-run-id",
+    }
+    assert event["duration_ms"] >= 0
+    assert "sensitive database detail" not in caplog.text
+    assert "authorization-secret" not in caplog.text
+    assert "private-owner-token" not in caplog.text
+    assert "private title" not in caplog.text
+
+
+def test_fenced_update_success_does_not_emit_failure(caplog) -> None:
+    class SuccessfulWriteClient:
+        def post(self, url: str, **kwargs: object) -> httpx.Response:
+            return httpx.Response(200, request=httpx.Request("POST", url), json=True)
+
+    store = SupabaseCrawlRunStore(
+        "https://db.example", "secret", client=SuccessfulWriteClient()
+    )
+
+    assert store._rpc_boolean(
+        "fenced_update_crawl_run",
+        {"p_run_id": "opaque-run-id", "p_operation": "progress"},
+    )
+
+    assert "persistence_write_failure" not in caplog.text
+
+
+def test_fenced_update_timeout_emits_transport_failure_without_http_status(caplog) -> None:
+    class DelayedResponse(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            time.sleep(0.1)
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"true")
+
+        def log_message(self, format: str, *args: object) -> None:
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), DelayedResponse)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    client = httpx.Client(timeout=0.01)
+    store = SupabaseCrawlRunStore(
+        f"http://127.0.0.1:{server.server_port}", "secret", client=client
+    )
+    try:
+        with pytest.raises(PersistenceError, match="persistence operation failed"):
+            store._rpc_boolean(
+                "fenced_update_crawl_run",
+                {"p_run_id": "opaque-run-id", "p_operation": "failed"},
+            )
+    finally:
+        client.close()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=1)
+
+    event = json.loads(caplog.records[-1].message)
+    assert event["event"] == "persistence_write_failure"
+    assert event["operation"] == "failed"
+    assert event["exception_class"] == "ReadTimeout"
+    assert event["http_status_code"] is None
+    assert event["run_id"] == "opaque-run-id"
+    assert event["payload_bytes"] > 0
+    assert event["duration_ms"] >= 0
+    assert "secret" not in caplog.text
 
 
 def test_startup_schema_validation_retains_all_runtime_probes() -> None:
