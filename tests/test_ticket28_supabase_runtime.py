@@ -42,6 +42,7 @@ def test_supabase_healthcheck_uses_canonical_postgrest_table() -> None:
             "Content-Type": "application/json",
         },
         "params": {"select": "run_id,owner_token,owner_version,checkpoint", "limit": "1"},
+        "timeout": 2.0,
     }
     assert len(client.requests) == 1
 
@@ -95,6 +96,52 @@ def test_readyz_offloads_slow_canonical_probe(monkeypatch: pytest.MonkeyPatch) -
             assert health.status_code == 200
             release.set()
             assert (await ready).status_code == 200
+
+    asyncio.run(exercise())
+
+
+def test_readyz_fails_closed_before_health_timeout_if_probe_stalls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_URL", "https://db.example")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "secret")
+    monkeypatch.setenv("WIKIGRAPH_USER_AGENT", "wikiGraph/test")
+    monkeypatch.setenv("WIKIGRAPH_IP_HASH_SECRET", "secret")
+    entered = threading.Event()
+    release = threading.Event()
+
+    class StalledClient(HealthClient):
+        def request(self, method: str, url: str, **kwargs: object) -> httpx.Response:
+            entered.set()
+            release.wait()
+            return super().request(method, url, **kwargs)
+
+    app = create_app(
+        production=True,
+        run_store=SupabaseCrawlRunStore(
+            "https://db.example", "secret", client=StalledClient()
+        ),
+    )
+
+    async def exercise() -> None:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            ready = asyncio.create_task(client.get("/readyz"))
+            try:
+                assert await asyncio.to_thread(entered.wait, 1)
+                started = time.monotonic()
+                health = await client.get("/healthz")
+                assert health.status_code == 200
+                response = await ready
+                elapsed = time.monotonic() - started
+                assert response.status_code == 503
+                assert response.json()["error"]["code"] == "persistence_unavailable"
+                assert elapsed < 4.0
+            finally:
+                release.set()
+                if not ready.done():
+                    await ready
 
     asyncio.run(exercise())
 

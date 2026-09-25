@@ -444,6 +444,7 @@ class SupabaseCrawlRunStore:
     """
 
     table = "crawl_runs"
+    readiness_request_timeout_seconds = 2.0
 
     def __init__(
         self,
@@ -511,6 +512,7 @@ class SupabaseCrawlRunStore:
             "GET",
             headers=self._headers(),
             params={"select": "run_id,owner_token,owner_version,checkpoint", "limit": "1"},
+            timeout=self.readiness_request_timeout_seconds,
         )
 
     def validate_runtime_schema(self) -> None:

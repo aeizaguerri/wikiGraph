@@ -326,8 +326,8 @@ def create_app(
     @app.get("/readyz")
     async def readiness() -> dict[str, str]:
         try:
-            await asyncio.to_thread(store.healthcheck)
-        except PersistenceError as exc:
+            await asyncio.wait_for(asyncio.to_thread(store.healthcheck), timeout=3.5)
+        except (PersistenceError, asyncio.TimeoutError) as exc:
             raise _error(503, "persistence_unavailable", str(exc)) from exc
         return {
             "status": "ready",
