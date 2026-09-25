@@ -87,7 +87,12 @@ class InMemoryResponseCache:
 
 
 class SupabaseResponseCache:
-    """PostgREST-backed cache; cache failures are handled as misses by callers."""
+    """PostgREST-backed cache; cache failures are handled as misses by callers.
+
+    Durable capacity eviction is write-recency/FIFO: reads do not update the
+    row's ``last_accessed_at``. This avoids a write and prune-trigger execution
+    for every cache hit; an older hot entry may therefore be evicted early.
+    """
 
     table = "upstream_response_cache"
 
@@ -213,16 +218,6 @@ class SupabaseResponseCache:
                 )
             except _TransientCacheFailure:
                 pass
-            return None
-        try:
-            self._request(
-                "patch",
-                key,
-                headers=self._headers(),
-                params={"cache_key": f"eq.{self._digest(key)}"},
-                json={"last_accessed_at": datetime.now(timezone.utc).isoformat()},
-            )
-        except _TransientCacheFailure:
             return None
         response_body = row["response"]
         if not isinstance(response_body, dict):

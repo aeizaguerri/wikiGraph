@@ -7,7 +7,11 @@ import pytest
 from tests.stub import FakeMediaWiki
 from wikigraph.governor import GlobalWikimediaGovernor
 from wikigraph.mediawiki import MediaWikiClient, MediaWikiError
-from wikigraph.response_cache import InMemoryResponseCache, ResponseCacheKey
+from wikigraph.response_cache import (
+    InMemoryResponseCache,
+    ResponseCacheKey,
+    SupabaseResponseCache,
+)
 
 
 class FakeClock:
@@ -29,6 +33,36 @@ def test_cache_expires_at_seven_days_and_evicts_lru() -> None:
     assert cache.get(second) == {"ok": 2}
     clock.value = 7 * 24 * 60 * 60
     assert cache.get(second) is None
+
+
+def test_supabase_hit_uses_one_read_without_touching_durable_row() -> None:
+    requests: list[httpx.Request] = []
+    accessed_at = "2026-01-01T00:00:00+00:00"
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json=[
+                {
+                    "response": {"query": {"pages": []}},
+                    "expires_at": "2099-01-01T00:00:00+00:00",
+                    "last_accessed_at": accessed_at,
+                }
+            ],
+            request=request,
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(respond))
+    cache = SupabaseResponseCache("https://db.example", "secret", client=client)
+    key = ResponseCacheKey("redirects", "en", '["Cache hit"]', "initial")
+    try:
+        assert cache.get(key) == {"query": {"pages": []}}
+        assert len(requests) == 1
+        assert requests[0].method == "GET"
+        assert requests[0].url.params["cache_key"] == f"eq.{cache._digest(key)}"
+    finally:
+        client.close()
 
 
 @pytest.mark.asyncio

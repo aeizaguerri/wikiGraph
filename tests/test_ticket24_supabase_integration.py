@@ -44,7 +44,23 @@ def test_real_schema_enforces_identity_and_seven_day_maximum() -> None:
     digest = cache._digest(key)
     try:
         cache.put(key, {"query": {"pages": []}})
+        before = client.get(
+            f"{POSTGREST_URL}/upstream_response_cache",
+            params={"cache_key": f"eq.{digest}", "select": "last_accessed_at"},
+            headers=_headers(),
+        )
+        assert before.status_code == 200, before.text
+        accessed_at_before = before.json()[0]["last_accessed_at"]
+
         assert cache.get(key) == {"query": {"pages": []}}
+
+        after = client.get(
+            f"{POSTGREST_URL}/upstream_response_cache",
+            params={"cache_key": f"eq.{digest}", "select": "last_accessed_at"},
+            headers=_headers(),
+        )
+        assert after.status_code == 200, after.text
+        assert after.json()[0]["last_accessed_at"] == accessed_at_before
 
         invalid = client.post(
             f"{POSTGREST_URL}/upstream_response_cache",
