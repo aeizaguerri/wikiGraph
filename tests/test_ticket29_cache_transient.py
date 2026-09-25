@@ -36,15 +36,22 @@ def test_real_http_read_timeout_is_transient(operation: str) -> None:
     server = ThreadingHTTPServer(("127.0.0.1", 0), DelayedPostgrest)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    client = httpx.Client(timeout=0.05)
+    client = httpx.Client(timeout=20.0)
     cache = SupabaseResponseCache(
-        f"http://127.0.0.1:{server.server_port}", "secret", client=client
+        f"http://127.0.0.1:{server.server_port}",
+        "secret",
+        client=client,
+        request_timeout_seconds=0.05,
     )
     try:
+        started = time.monotonic()
         if operation == "get":
             assert cache.get(KEY) is None
         else:
             cache.put(KEY, {"query": {"pages": []}})
+        elapsed = time.monotonic() - started
+        assert elapsed <= 0.5
+        assert client.timeout.read == 20.0
     finally:
         client.close()
         server.shutdown()

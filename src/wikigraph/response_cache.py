@@ -99,11 +99,15 @@ class SupabaseResponseCache:
         client: httpx.Client | None = None,
         rest_path: str = "/rest/v1",
         capacity: int = 10_000,
+        request_timeout_seconds: float = 3.0,
     ) -> None:
+        if request_timeout_seconds <= 0:
+            raise ValueError("cache request timeout must be positive")
         self._url = url.rstrip("/")
         self._key = key
         self._rest_path = rest_path.strip("/")
         self.capacity = capacity
+        self._request_timeout_seconds = request_timeout_seconds
         self._client = client or httpx.Client(timeout=3.0)
         self._owns_client = client is None
 
@@ -171,6 +175,7 @@ class SupabaseResponseCache:
     def _request(
         self, operation: str, key: ResponseCacheKey, **kwargs: Any
     ) -> httpx.Response:
+        kwargs.setdefault("timeout", self._request_timeout_seconds)
         try:
             response = cast(
                 httpx.Response,
