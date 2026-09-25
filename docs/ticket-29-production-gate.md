@@ -60,6 +60,49 @@ criterion remains incomplete rather than being promoted to production proof.
 
 ## Explicit blockers and rollback posture
 
+## Migration 00007 overlap assessment
+
+**Decision: STOP; the revoke-first sequence is not yet accepted as a safe
+cutover.** The local PostgREST ownership integration suite passed against the
+isolated ticket28 harness with migration `20260925000007_crawl_run_ownership`
+already applied:
+
+```text
+uv run pytest tests/test_ticket29_ownership_integration.py -q
+12 passed in 2.08s
+```
+
+That suite proves raw service-role `POST`/`PATCH` to `crawl_runs` are denied,
+and proves the new ownership RPCs can create, heartbeat, and transition runs.
+Source inspection of the deployed commit `831644e9b2de0e618ab12b82387f595e395574ff`
+shows its store starts via direct table `POST` and persists progress,
+checkpoints, and terminal state via direct table `PATCH`; therefore those old
+write attempts should fail after the revoke. Its `expire_crawl_runs` RPC is a
+pre-existing `SECURITY DEFINER` function, but it only expires rows whose
+`expires_at <= p_now`; the old runtime supplies its current clock and this is
+not a general write path for active runs. Admission and Wikimedia governor RPCs
+do not write `crawl_runs`.
+
+This is **not a PASS**: the integration suite exercises equivalent raw REST
+requests and RPCs, not the old binary's real HTTP launch/worker path or the new
+binary's actual adapter end-to-end. It consequently does not establish that an
+old launch cannot return HTTP 201, how that handler reports its later write
+failure, or that new binary start/progress/complete/heartbeat all work through
+the application adapter. Nor does it establish that no runs are active at
+cutover. Do not apply the migration to production on this evidence alone.
+
+If these adapter-level local proofs pass, revoking direct grants before
+deploying the new SHA can be a data-integrity fence without proving old Render
+processes have drained: the legacy worker's direct writes are denied, while the
+new worker's allowlisted owner RPCs remain available. This does not make the
+transition zero-downtime: the old launch handler may accept a request before
+its asynchronous direct insert fails, and the new app may be unavailable until
+deployment completes. Block user ingress for UX if practical, but direct
+Render-origin access remains possible unless separately restricted. Do not
+restore old grants as an automatic rollback: first drain the new workers and
+resolve any owner-token rows. No production database, Render deployment, or
+hosted migration was touched for this assessment.
+
 The public Render API and read-only Render CLI are reachable for bounded smoke
 runs, but required deployment metrics and restart authority are unavailable. The
 precise missing access is:
