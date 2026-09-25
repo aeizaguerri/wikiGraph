@@ -178,6 +178,8 @@ class Crawler:
                         recent=list(recent),
                     )
                 )
+                if truncated:
+                    break
             frontier = next_frontier
 
         return CrawlResult(
