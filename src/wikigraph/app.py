@@ -124,6 +124,7 @@ class LaunchLimits:
     deployment_per_minute: int = 30
     per_ip_per_day: int = 50
     max_ip_keys: int = 10_000
+    run_attempt_quota: int = 120
 
     @classmethod
     def from_environment(cls) -> "LaunchLimits":
@@ -132,6 +133,7 @@ class LaunchLimits:
             deployment_per_minute=_positive_setting("WIKIGRAPH_LAUNCHES_PER_MINUTE", 30),
             per_ip_per_day=_positive_setting("WIKIGRAPH_LAUNCH_QUOTA", 50),
             max_ip_keys=_positive_setting("WIKIGRAPH_LAUNCH_IP_KEYS", 10_000),
+            run_attempt_quota=_positive_setting("WIKIGRAPH_RUN_ATTEMPT_QUOTA", 120),
         )
 
 
@@ -262,7 +264,9 @@ def create_app(
         validate_production_configuration()
     if run_store is None:
         store: CrawlRunStore = (
-            SupabaseCrawlRunStore(governor=governor)
+            SupabaseCrawlRunStore(
+                governor=governor, attempt_quota=limits.run_attempt_quota
+            )
             if require_production_config
             else InMemoryCrawlRunStore(governor)
         )

@@ -458,6 +458,7 @@ class SupabaseCrawlRunStore:
         cache: ResponseCache | None = None,
         clock: Callable[[], datetime] | None = None,
         heartbeat_interval_seconds: float = 30.0,
+        attempt_quota: int = 120,
     ) -> None:
         self._url = (url or os.environ.get("SUPABASE_URL", "")).rstrip("/")
         self._key = key or os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
@@ -471,6 +472,9 @@ class SupabaseCrawlRunStore:
         if heartbeat_interval_seconds <= 0:
             raise ValueError("Heartbeat interval must be positive.")
         self._heartbeat_interval_seconds = heartbeat_interval_seconds
+        if attempt_quota < 1:
+            raise ValueError("Run attempt quota must be positive.")
+        self._attempt_quota = attempt_quota
         self._cache = (
             cache
             if cache is not None
@@ -661,6 +665,7 @@ class SupabaseCrawlRunStore:
             "p_node_cap": request.node_cap,
             "p_checkpoint": _checkpoint_json(_initial_checkpoint(request)),
             "p_owner_token": owner_token,
+            "p_attempt_quota": self._attempt_quota,
         }
         records = self._rpc_request("create_owned_crawl_run", row)
         if not records or records[0].get("run_id") != run_id:

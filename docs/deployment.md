@@ -14,6 +14,13 @@ roles. Render uses `/readyz` as its health check, so an unavailable canonical
 database or missing runtime RPC prevents the service from being considered
 healthy.
 
+Each newly created run snapshots the positive integer
+`WIKIGRAPH_RUN_ATTEMPT_QUOTA` setting (default `120`), configured in `render.yaml`.
+Cold runs requiring more than 120 uncached upstream attempts need an explicit
+higher server setting; cached hits are free, and every uncached request is
+reserved against the run quota before HTTP begins. A same-run retry keeps the
+original snapshot and quota already spent; it does not reset the budget.
+
 Retention cleanup runs immediately at production startup and periodically
 every 15 minutes (override with the positive
 `WIKIGRAPH_RETENTION_INTERVAL_SECONDS` setting). A failed cleanup is logged and
