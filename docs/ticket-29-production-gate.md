@@ -63,6 +63,21 @@ maximum 1 in-flight request, 2 request starts per second, and 120 attempts per
 minute. The warm-cache objective does not authorize relaxing any of these
 limits.
 
+## Bounded hosted cache-write canary — 2026-09-26
+
+At 2026-09-26 21:07:15Z, Render revision `8b27f6c` returned `/readyz`
+HTTP 200; a separate Supabase migration listing confirmed versions `00000`–
+`00007`. A read-only run/cache inventory found no active run and no fresh
+`en` article-links cache entry for Aric Hagberg. One direct POST launched
+a depth-1, node-cap-2 English run (`ce3e9b82-e652-4d49-864c-c39bfb014d8f`),
+returning HTTP 201. SSE reported `progress` and `completed`; Graph returned
+HTTP 200 with 2 nodes, 1 edge, 1 crawled, truncated true, and 0 dangling edges.
+The application completion event recorded 2.798s. The bounded 31-entry log sample contained 3 upstream
+attempts and an article-links `hit:false`. One new 777-byte article-links row
+was fetched at 21:07:17.897773Z and expires October 3. There was no repeat or
+cleanup. This establishes one deployed miss/write path only; it is not a
+2,500-node benchmark, deployed fairness, retention, or recovery proof.
+
 ## Criterion state
 
 | Criterion | State | Evidence origin / remaining proof |
@@ -71,7 +86,7 @@ limits.
 | Reopen and seven-day retention | **bounded browser reopen proven; retention pending** | The two browser run URLs reopened immediately through Cloudflare; seven-day elapsed/controlled retention evidence is still absent. |
 | Render restart checkpoint recovery | **pending** | Requires an operator-coordinated restart and same-run manual retry receipt. |
 | Representative 2,500-Article benchmark | **incomplete** | One warm sample met the approximate 120-second objective: a 2,500-node-capped graph with 5,033 edges and 51 source Articles crawled completed in 99.223 seconds. This does not prove repeatability or representative workload generalization. The 1,304-attempt cold fixture gives only a >=652-second theoretical floor at unchanged governor limits, not cold performance proof. Deployed timing/upstream/continuation/cache/retry/fairness/CPU/memory/persistence metrics and broader workload evidence remain absent. |
-| Concurrent global budget and fairness | **local-only** | Deterministic local governor proves 1 in-flight, 2 starts/second, 120 attempts/minute and alternating owners; cross-process deployed evidence is pending. |
+| Concurrent global budget and fairness | **local-only** | The deterministic local governor tests prove 1 in-flight, 2 starts/second, 120 attempts/minute and alternating owners. Ticket-branch commit `8c1ed5f` also passed a real two-client PostgREST governor test; the full role-shaped suite passed 171 tests, 0 skipped. These are local proofs, not deployed fairness evidence; cross-process deployed evidence is pending. |
 | Injected 429/503/maxlag recovery | **pending** | Must use an isolated harness or approved seam, never real Wikimedia traffic. |
 | Supabase failure fail-closed and retention | **live-probe-only** | `/readyz` was healthy; controlled availability failure and seven-day boundary evidence are pending. |
 | Higher budget disabled | **pending** | Must record deployed configuration/eligibility evidence. No higher budget was enabled by this ticket. |
