@@ -22,6 +22,13 @@ class Clock(Protocol):
     async def sleep(self, delay: float) -> None: ...
 
 
+class RunAttemptQuotaExceeded(RuntimeError):
+    """The durable per-run upstream-attempt budget has been exhausted."""
+
+    def __init__(self) -> None:
+        super().__init__("This Crawl run has reached its upstream request limit.")
+
+
 class WikimediaAdmission(Protocol):
     async def acquire(self, owner: str) -> None: ...
 
@@ -254,6 +261,11 @@ class SupabaseWikimediaAdmission:
             decision = body[0]
             if bool(decision.get("granted")):
                 return
+            denial_code = decision.get("denial_code")
+            if denial_code == "run_quota_exhausted":
+                raise RunAttemptQuotaExceeded()
+            if denial_code is not None:
+                raise RuntimeError("Supabase denied Wikimedia admission.")
             delay = max(float(decision.get("retry_after_seconds", 0.05)), 0.01)
             await self._clock.sleep(delay)
 
