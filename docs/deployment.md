@@ -6,13 +6,16 @@ not contain credentials; set the `sync: false` values in Render's environment
 configuration.
 
 Before deploying, apply every migration under `supabase/migrations/` in order,
-including `20260922000005_runtime_security.sql`, and verify `/readyz` against
-the target project. The final migration explicitly grants the Render
-`service_role` only the runtime tables and RPCs, revokes those tables/RPCs from
-`anon` and `authenticated`, and enables RLS with deny policies for browser
-roles. Render uses `/readyz` as its health check, so an unavailable canonical
+including `20260922000005_runtime_security.sql` and
+`20260928000010_run_cancellation.sql`. Migration 00010 must be applied before
+deploying a runtime that enables operator cancellation. Verify `/readyz` against
+the target project. The runtime security migration restricts tables and RPCs
+to Render's `service_role`, revokes browser-role access, and enables RLS deny
+policies; later migrations must retain those restrictions. Render uses `/readyz` as its health check, so an unavailable canonical
 database or missing runtime RPC prevents the service from being considered
-healthy.
+healthy. `/readyz` does not attest the optional operator-cancellation RPC;
+verify that capability through authorized local PostgREST tests, not a
+mutating health probe.
 
 Each newly created run snapshots the positive integer
 `WIKIGRAPH_RUN_ATTEMPT_QUOTA` setting (default `120`), configured in `render.yaml`.
@@ -20,6 +23,25 @@ Cold runs requiring more than 120 uncached upstream attempts need an explicit
 higher server setting; cached hits are free, and every uncached request is
 reserved against the run quota before HTTP begins. A same-run retry keeps the
 original snapshot and quota already spent; it does not reset the budget.
+
+`WIKIGRAPH_OPERATOR_CANCEL_TOKEN` is optional for ordinary API service, but is
+required to enable operator cancellation. Configure it in Render as a separate
+server-only secret of at least 32 characters. Generate a random value (for
+example, `python -c 'import secrets; print(secrets.token_urlsafe(32))'`) and
+store it only in Render and the authorized operator's secret store. Do not
+reuse the IP hash secret or expose this token to the browser. Without a valid
+token, `POST /api/operator/runs/{run_id}/cancel` returns 503. Use the token from
+a trusted operator shell, not a browser:
+
+```sh
+curl --fail-with-body -X POST \
+  "https://wikigraph.onrender.com/api/operator/runs/${RUN_ID}/cancel" \
+  -H "Authorization: Bearer ${WIKIGRAPH_OPERATOR_CANCEL_TOKEN}"
+```
+
+Cancellation returns the durable result and fences later admissions. An
+upstream attempt already granted may finish and remains charged; only an
+explicit retry of the same run ID resumes the checkpoint.
 
 Retention cleanup runs immediately at production startup and periodically
 every 15 minutes (override with the positive

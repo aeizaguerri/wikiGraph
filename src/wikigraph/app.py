@@ -47,6 +47,8 @@ SSE_HEARTBEAT_SECONDS = 15.0
 LAUNCH_WINDOW_SECONDS = 60.0
 QUOTA_WINDOW_SECONDS = 24 * 60 * 60
 RETENTION_CLEANUP_INTERVAL_SECONDS = 15 * 60
+OPERATOR_CANCEL_TOKEN_ENV = "WIKIGRAPH_OPERATOR_CANCEL_TOKEN"
+OPERATOR_CANCEL_TOKEN_MIN_LENGTH = 32
 logger = logging.getLogger(__name__)
 
 
@@ -272,6 +274,15 @@ def create_app(
         )
     else:
         store = run_store
+    operator_cancel_token = os.environ.get(OPERATOR_CANCEL_TOKEN_ENV, "")
+    ip_hash_secret = os.environ.get("WIKIGRAPH_IP_HASH_SECRET", "")
+    service_role_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
+    operator_cancel_token_configured = (
+        len(operator_cancel_token) >= OPERATOR_CANCEL_TOKEN_MIN_LENGTH
+        and operator_cancel_token.isascii()
+        and operator_cancel_token.strip() == operator_cancel_token
+        and operator_cancel_token not in {ip_hash_secret, service_role_key}
+    )
     admission_store = launch_admission_store
     if admission_store is None and require_production_config:
         from wikigraph.runs import SupabaseLaunchAdmissionStore
@@ -432,6 +443,37 @@ def create_app(
         except PersistenceError as exc:
             raise _error(409, "run_not_recoverable", str(exc)) from exc
         return RunCreated(run_id=run.id)
+
+    @app.post("/api/operator/runs/{run_id}/cancel")
+    async def cancel_run(run_id: str, request: Request) -> dict[str, str]:
+        if not operator_cancel_token_configured:
+            raise _error(
+                503,
+                "operator_cancel_unconfigured",
+                "Operator cancellation is not configured with a strong server token.",
+            )
+        supplied = request.headers.get("authorization", "")
+        if not hmac.compare_digest(
+            supplied.encode(), f"Bearer {operator_cancel_token}".encode()
+        ):
+            raise _error(401, "operator_unauthorized", "Operator authorization is required.")
+        if not isinstance(store, SupabaseCrawlRunStore):
+            raise _error(
+                503,
+                "operator_cancel_unavailable",
+                "Durable operator cancellation is unavailable.",
+            )
+        try:
+            result = await store.cancel_run(run_id)
+        except PersistenceError as exc:
+            raise _error(503, "persistence_unavailable", str(exc)) from exc
+        if result == "not_found":
+            raise _error(404, "unknown_run", "No crawl run with that identifier.")
+        if result == "not_running":
+            raise _error(409, "run_not_running", "The crawl run is not running.")
+        if result == "expired":
+            raise _error(410, "run_expired", "The crawl run has expired.")
+        return {"runId": run_id, "result": result}
 
     @app.get("/api/runs/{run_id}/events")
     async def run_events(run_id: str) -> StreamingResponse:
