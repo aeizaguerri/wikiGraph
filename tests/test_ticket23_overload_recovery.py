@@ -15,6 +15,7 @@ from benchmarks.ticket19_representative import DeterministicClock
 from wikigraph.crawler import CrawlRequest
 from wikigraph.governor import GlobalWikimediaGovernor, SupabaseWikimediaAdmission
 from wikigraph.mediawiki import MediaWikiClient, UpstreamOverload
+from wikigraph.response_cache import InMemoryResponseCache
 from wikigraph.runs import InMemoryCrawlRunStore, RunStatus, SupabaseCrawlRunStore
 from wikigraph.app import create_app
 from tests.helpers import collect_events, fetch_graph
@@ -178,6 +179,7 @@ async def test_real_public_lifecycle_persists_overload_wait_and_resumes_same_run
             REAL_KEY,
             rest_path="",
             governor=governor,
+            cache=InMemoryResponseCache(),
         )
         return create_app(
             mediawiki_transport=transport,
