@@ -85,6 +85,7 @@ async def test_postgrest_creation_defaults_snapshots_and_retry_preserves_quota(
     store = SupabaseCrawlRunStore(
         URL, JWT, rest_path="", attempt_quota=7, governor=governor
     )
+    retry_store: SupabaseCrawlRunStore | None = None
     run = store.start_run(CrawlRequest(seed, 1, "en", node_cap=1), stub.transport)
     try:
         for _ in range(200):
@@ -99,13 +100,38 @@ async def test_postgrest_creation_defaults_snapshots_and_retry_preserves_quota(
         )
         gate.set()
         await run.wait_done()
-        retry = store.retry_run(run.id, stub.transport)
+        assert _sql(
+            f"select status='recoverable' and attempt_quota=7 and attempts_used=1 "
+            f"from public.crawl_runs where run_id='{run.id}'"
+        ) == "t"
+
+        # Reconstruct the process-facing store and governor; this is not a literal
+        # process kill or reboot, but verifies the retry reads its persisted quota.
+        await store.shutdown()
+        retry_governor = GlobalWikimediaGovernor(
+            admission=SupabaseWikimediaAdmission(URL, JWT, rest_path="")
+        )
+        retry_store = SupabaseCrawlRunStore(
+            URL, JWT, rest_path="", attempt_quota=99, governor=retry_governor
+        )
+        before_retry = _sql(
+            f"select attempt_quota=7 and attempts_used=1 "
+            f"from public.crawl_runs where run_id='{run.id}'"
+        )
+        assert before_retry == "t"
+        retry = retry_store.retry_run(run.id, stub.transport)
         assert retry.id == run.id
         assert _sql(
             f"select attempt_quota=7 and attempts_used=1 "
             f"from public.crawl_runs where run_id='{run.id}'"
         ) == "t"
         await retry.wait_done()
+        assert _sql(
+            f"select status='completed' and attempt_quota=7 and attempts_used=1 "
+            f"from public.crawl_runs where run_id='{run.id}'"
+        ) == "t"
     finally:
+        gate.set()
         await store.shutdown()
-        store._client.close()
+        if retry_store is not None:
+            await retry_store.shutdown()
