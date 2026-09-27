@@ -705,6 +705,40 @@ class SupabaseCrawlRunStore:
         self._runs[run_id] = run
         return run
 
+    async def cancel_run(self, run_id: str) -> str:
+        """Cancel a persisted run and stop any locally-owned worker promptly."""
+        result = await asyncio.to_thread(self._cancel_run, run_id)
+        if result == "cancelled":
+            active = self._runs.get(run_id)
+            if active is not None:
+                active._ownership_lost = True
+                if active.task is not None and not active.task.done():
+                    active.task.cancel()
+        return result
+
+    def _cancel_run(self, run_id: str) -> str:
+        endpoint = self._rest_endpoint("rpc/cancel_crawl_run")
+        try:
+            response = self._client.post(
+                endpoint,
+                headers=self._headers(),
+                json={"p_run_id": run_id},
+            )
+            response.raise_for_status()
+            body = response.json()
+        except (httpx.HTTPError, OSError, ValueError) as exc:
+            raise PersistenceError("Supabase crawl run cancellation failed.") from exc
+        result = body[0].get("result") if (
+            isinstance(body, list) and len(body) == 1 and isinstance(body[0], dict)
+        ) else None
+        if not isinstance(result, str) or result not in {
+            "cancelled", "not_found", "not_running", "expired"
+        }:
+            raise PersistenceError(
+                "Supabase returned an invalid crawl run cancellation result."
+            )
+        return result
+
     def get(self, run_id: str) -> CrawlRun | None:
         active = self._runs.get(run_id)
         records = self._request(
@@ -717,7 +751,12 @@ class SupabaseCrawlRunStore:
         row = records[0]
         # Locally-owned work is authoritative only while its task is actually
         # running. A hydrated handle has no task and must follow the database.
-        if active is not None and active.task is not None and not active.task.done():
+        if (
+            active is not None
+            and not active._ownership_lost
+            and active.task is not None
+            and not active.task.done()
+        ):
             return active
         if row.get("status") == RunStatus.RUNNING.value and row.get("owner_token") is None:
             raise PersistenceError(
@@ -752,7 +791,11 @@ class SupabaseCrawlRunStore:
                 return None
             row = records[0]
         if active is not None and row.get("status") != RunStatus.EXPIRED.value:
-            if active.task is not None and not active.task.done():
+            if (
+                not active._ownership_lost
+                and active.task is not None
+                and not active.task.done()
+            ):
                 return active
         request = CrawlRequest(
             seed=str(row["seed"]),
