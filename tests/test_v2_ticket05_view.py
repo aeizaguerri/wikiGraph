@@ -42,9 +42,10 @@ INK_JS = """
 EMPTY_POINT_JS = """
 () => {
   const sigma = window.__wikigraph.sigma;
-  for (let y = 40; y < 900; y += 20) {
-    for (let x = 20; x < 1200; x += 20) {
-      if (!sigma.getNodeAtPosition({ x, y })) return { x, y };
+  const rect = document.getElementById("graph").getBoundingClientRect();
+  for (let y = 20; y < rect.height - 20; y += 20) {
+    for (let x = 20; x < rect.width - 20; x += 20) {
+      if (!sigma.getNodeAtPosition({ x, y })) return { x: rect.left + x, y: rect.top + y };
     }
   }
   return null;
@@ -105,7 +106,13 @@ async def test_wheel_zoom_and_pan_drive_the_camera(
     await browser_page.goto(view_url(view_server, run_id))
     await browser_page.wait_for_function("() => window.__wikigraph", timeout=BOOT_TIMEOUT)
 
-    await browser_page.mouse.move(640, 360)
+    graph_center = await browser_page.locator("#graph").bounding_box()
+    assert graph_center is not None
+    await browser_page.mouse.move(
+        graph_center["x"] + graph_center["width"] / 2,
+        graph_center["y"] + graph_center["height"] / 2,
+    )
+    await browser_page.locator("#graph").hover()
     for _ in range(3):
         await browser_page.mouse.wheel(0, -640)  # scroll-up zooms the camera in
         await asyncio.sleep(SETTLE_PAUSE)
@@ -142,7 +149,13 @@ async def test_labels_show_dots_first_then_names_on_approach(
 
     assert await browser_page.evaluate(INK_JS) == 0  # structure only, no text yet
 
-    await browser_page.mouse.move(640, 360)
+    graph_center = await browser_page.locator("#graph").bounding_box()
+    assert graph_center is not None
+    await browser_page.mouse.move(
+        graph_center["x"] + graph_center["width"] / 2,
+        graph_center["y"] + graph_center["height"] / 2,
+    )
+    await browser_page.locator("#graph").hover()
     for _ in range(5):
         await browser_page.mouse.wheel(0, -640)
         await asyncio.sleep(SETTLE_PAUSE)

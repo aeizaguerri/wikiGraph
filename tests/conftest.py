@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import socket
 import threading
 from collections.abc import AsyncIterator, Callable
@@ -13,9 +14,24 @@ import uvicorn
 from tests.helpers import collect_events, create_run
 from tests.stub import FakeMediaWiki
 from wikigraph.app import STATIC_DIR, create_app
+from wikigraph.runs import InMemoryCrawlRunStore
 
 VIEW_ENTRY = STATIC_DIR / "index.html"
 BOOT_TIMEOUT = 10_000
+
+
+@pytest.fixture(autouse=True)
+def isolate_real_upstream_cache() -> None:
+    """Keep real integration tests independent while exercising shared cache wiring."""
+    url = os.environ.get("WIKIGRAPH_TICKET24_POSTGREST_URL")
+    key = os.environ.get("WIKIGRAPH_TICKET24_POSTGREST_KEY")
+    if url and key:
+        response = httpx.delete(
+            f"{url}/upstream_response_cache",
+            headers={"apikey": key, "Authorization": f"Bearer {key}"},
+            timeout=10.0,
+        )
+        response.raise_for_status()
 
 
 @pytest.fixture
@@ -69,14 +85,14 @@ def free_port() -> int:
 
 @pytest.fixture
 async def view_server(
-    stub: FakeMediaWiki, free_port: int
+    stub: FakeMediaWiki, free_port: int, view_store: InMemoryCrawlRunStore
 ) -> AsyncIterator[httpx.AsyncClient]:
     """The real FastAPI app on a real port, MediaWiki transport stubbed."""
     if not VIEW_ENTRY.is_file():
         pytest.skip("view not built: run `npm run build` in frontend/")
     server = uvicorn.Server(
         uvicorn.Config(
-            create_app(mediawiki_transport=stub.transport),
+            create_app(mediawiki_transport=stub.transport, run_store=view_store),
             host="127.0.0.1",
             port=free_port,
             log_level="error",
@@ -96,6 +112,11 @@ async def view_server(
     finally:
         server.should_exit = True
         thread.join(timeout=5)
+
+
+@pytest.fixture
+def view_store() -> InMemoryCrawlRunStore:
+    return InMemoryCrawlRunStore()
 
 
 @pytest.fixture

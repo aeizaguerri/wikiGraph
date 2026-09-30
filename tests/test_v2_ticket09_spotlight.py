@@ -39,7 +39,9 @@ NODE_POS_JS = """
 (node) => {
   const experience = window.__wikigraph;
   const attrs = experience.graph.getNodeAttributes(node);
-  return experience.sigma.graphToViewport({ x: attrs.x, y: attrs.y });
+  const point = experience.sigma.graphToViewport({ x: attrs.x, y: attrs.y });
+  const rect = document.getElementById("graph").getBoundingClientRect();
+  return { x: rect.left + point.x, y: rect.top + point.y };
 }
 """
 
@@ -48,6 +50,7 @@ NODE_POS_JS = """
 EMPTY_POINT_JS = """
 () => {
   const sigma = window.__wikigraph.sigma;
+  const rect = document.getElementById("graph").getBoundingClientRect();
   const card = document.getElementById('info-card');
   const blocked = (!card.hidden)
     ? card.getBoundingClientRect()
@@ -55,10 +58,11 @@ EMPTY_POINT_JS = """
   const intersects = ({ x, y }) => blocked
     && y > blocked.top - 10 && y < blocked.bottom + 10
     && x > blocked.left - 10 && x < blocked.right + 10;
-  for (let y = 40; y < 900; y += 20) {
-    for (let x = 20; x < 1200; x += 20) {
-      if (intersects({ x, y })) continue;
-      if (!sigma.getNodeAtPosition({ x, y })) return { x, y };
+  for (let y = 20; y < rect.height - 20; y += 20) {
+    for (let x = 20; x < rect.width - 20; x += 20) {
+      const pagePoint = { x: rect.left + x, y: rect.top + y };
+      if (intersects(pagePoint)) continue;
+      if (!sigma.getNodeAtPosition({ x, y })) return pagePoint;
     }
   }
   return null;

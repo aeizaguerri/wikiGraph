@@ -1,0 +1,14 @@
+{
+  "$schema": "https://unpkg.com/wrangler@4/config-schema.json",
+  "name": "wikigraph-frontend",
+  "main": "./cloudflare/worker.js",
+  "compatibility_date": "2025-07-01",
+  "workers_dev": true,
+  "preview_urls": true,
+  "assets": {
+    "directory": "./src/wikigraph/static",
+    "binding": "ASSETS",
+    "run_worker_first": true,
+    "not_found_handling": "single-page-application"
+  }
+}

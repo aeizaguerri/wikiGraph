@@ -155,11 +155,14 @@ async def test_detection_failure_fails_the_run(client, stub, monkeypatch):
     events = await collect_events(client, run_id)
 
     assert events[-1]["type"] == "failed"
-    assert "detection exploded" in events[-1]["data"]["error"]
+    assert events[-1]["data"]["error"] == "The crawl run failed."
+    assert "detection exploded" not in events[-1]["data"]["error"]
 
     response = await client.get(f"/api/runs/{run_id}/graph")
     assert response.status_code == 409
     assert response.json()["error"]["code"] == "run_failed"
+    assert response.json()["error"]["message"] == "The crawl run failed."
+    assert "detection exploded" not in response.text
 
 
 async def test_all_isolated_graph_yields_singleton_communities(client, stub):
