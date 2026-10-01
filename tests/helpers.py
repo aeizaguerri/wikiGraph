@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
@@ -12,6 +13,18 @@ from wikigraph.runs import TERMINAL_EVENT_TYPES
 # FA2 settle is 6 s in the UI contract; the extra headroom covers worker boot
 # under load.
 STATIC_WAIT = 14_000
+
+
+class DeterministicClock:
+    def __init__(self) -> None:
+        self.current = 0.0
+
+    def now(self) -> float:
+        return self.current
+
+    async def sleep(self, delay: float) -> None:
+        self.current += delay
+        await asyncio.sleep(0)
 
 
 async def wait_static(page: Any) -> None:

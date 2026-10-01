@@ -1,6 +1,6 @@
 {
   "$schema": "https://unpkg.com/wrangler@4/config-schema.json",
-  "name": "wikigraph-frontend",
+  "name": "wikigraph",
   "main": "./cloudflare/worker.js",
   "compatibility_date": "2025-07-01",
   "workers_dev": true,

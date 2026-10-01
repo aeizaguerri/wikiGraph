@@ -11,14 +11,13 @@ from typing import Any
 import httpx
 import pytest
 
-from benchmarks.ticket19_representative import DeterministicClock
+from tests.helpers import DeterministicClock, collect_events, fetch_graph
 from wikigraph.crawler import CrawlRequest
 from wikigraph.governor import GlobalWikimediaGovernor, SupabaseWikimediaAdmission
 from wikigraph.mediawiki import MediaWikiClient, UpstreamOverload
 from wikigraph.response_cache import InMemoryResponseCache
 from wikigraph.runs import InMemoryCrawlRunStore, RunStatus, SupabaseCrawlRunStore
 from wikigraph.app import create_app
-from tests.helpers import collect_events, fetch_graph
 
 
 REAL_URL = os.environ.get("WIKIGRAPH_TICKET23_POSTGREST_URL")

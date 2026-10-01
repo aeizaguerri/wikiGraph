@@ -8,8 +8,7 @@ import json
 import httpx
 import pytest
 
-from benchmarks.ticket19_representative import DeterministicClock
-from tests.helpers import collect_events, fetch_graph
+from tests.helpers import DeterministicClock, collect_events, fetch_graph
 from tests.stub import FakeMediaWiki
 from wikigraph.app import _event_stream, create_app
 from wikigraph.crawler import CrawlRequest

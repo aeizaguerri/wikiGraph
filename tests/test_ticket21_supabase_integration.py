@@ -14,9 +14,8 @@ import os
 import httpx
 import pytest
 
-from tests.helpers import fetch_graph
+from tests.helpers import DeterministicClock, fetch_graph
 from tests.stub import FakeMediaWiki
-from benchmarks.ticket19_representative import DeterministicClock
 from wikigraph.app import create_app
 from wikigraph.governor import GlobalWikimediaGovernor
 from wikigraph.runs import SupabaseCrawlRunStore
