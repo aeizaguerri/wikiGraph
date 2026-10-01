@@ -63,7 +63,10 @@ async def test_capped_graph_chrome_does_not_collide_and_legend_is_expanded_only(
             "() => window.__wikigraph && !document.getElementById('truncation').hidden",
             timeout=BOOT_TIMEOUT,
         )
-        await browser_page.wait_for_timeout(50)
+        await browser_page.wait_for_function(
+            "() => /settling|re-heating/.test(document.getElementById('status').textContent)",
+            timeout=BOOT_TIMEOUT,
+        )
 
         for lens_id in ("lens-community", "lens-level"):
             if lens_id == "lens-level":
@@ -110,7 +113,8 @@ async def test_capped_graph_chrome_does_not_collide_and_legend_is_expanded_only(
                 return {left, top, right, bottom};
               };
               return {lens: rect('#lens'), warning: rect('#truncation'),
-                legend: rect('#legend'), viewport: {width: innerWidth, height: innerHeight}};
+                legend: rect('#legend'), status: rect('#status'), close: rect('#graph-collapse'),
+                viewport: {width: innerWidth, height: innerHeight}};
             }""")
             for name in ("lens", "warning", "legend"):
                 box = expanded[name]
@@ -123,6 +127,12 @@ async def test_capped_graph_chrome_does_not_collide_and_legend_is_expanded_only(
                         a["left"] < b["right"] and a["right"] > b["left"]
                         and a["top"] < b["bottom"] and a["bottom"] > b["top"]
                     ), f"expanded {first} overlaps {second} at {width}px: {expanded}"
+            for target in ("lens", "warning", "legend", "close"):
+                a, b = expanded["status"], expanded[target]
+                assert not (
+                    a["left"] < b["right"] and a["right"] > b["left"]
+                    and a["top"] < b["bottom"] and a["bottom"] > b["top"]
+                ), f"expanded status overlaps {target} at {width}px: {expanded}"
             await browser_page.get_by_role("button", name="Close expanded graph").click()
             assert not await browser_page.locator("#legend").is_visible()
             await browser_page.click("#graph-expand")

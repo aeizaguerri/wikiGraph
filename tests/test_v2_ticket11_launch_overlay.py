@@ -71,6 +71,11 @@ async def test_variant_c_mid_crawl_failure_is_visible_without_graph_or_retry(
     await browser_page.wait_for_function("() => document.getElementById('run-state').textContent.includes('failed')", timeout=BOOT_TIMEOUT)
     assert await browser_page.is_visible("#run-waiting")
     assert not await browser_page.is_visible("#run-retry")
+    assert await browser_page.locator("#run-orbit").count() == 0
+    assert await browser_page.text_content("#run-badge") == "Needs attention"
+    assert "failed" in (await browser_page.text_content("#run-state")).lower()
+    assert await browser_page.locator("#run-crawled").count() == 1
+    assert await browser_page.locator("#run-discovered").count() == 1
     assert await browser_page.text_content("#run-detail") == "This run failed and did not produce a completed Graph."
 
 
@@ -91,13 +96,17 @@ async def test_variant_c_real_run_uses_live_graph_preview_and_same_run_url(
     assert await browser_page.is_visible("#run-view")
     assert "Building your Graph" in await browser_page.text_content("#run-state")
     assert await browser_page.text_content("#run-detail") == "You can leave this tab. The server keeps the run alive."
-    assert await browser_page.text_content("#run-percent") == "…"
+    assert await browser_page.locator("#run-orbit").count() == 0
+    assert await browser_page.text_content("#run-badge") == "Live"
     assert await browser_page.text_content("#run-crawled") == "0"
+    assert await browser_page.text_content("#run-discovered") == "1"
     assert await browser_page.locator("#launch-chip").count() == 0
 
     gate.set()
     await browser_page.wait_for_function("() => document.getElementById('run-waiting').hidden && window.__wikigraph.graph.hasNode('Rosario')", timeout=BOOT_TIMEOUT)
     assert f"run={run_id}" in browser_page.url
+    assert await browser_page.locator("#run-orbit").count() == 0
+    assert await browser_page.text_content("#run-badge") == "Ready"
     assert int(await browser_page.text_content("#run-crawled")) > 0
     assert int(await browser_page.text_content("#run-discovered")) >= int(await browser_page.text_content("#run-crawled"))
 

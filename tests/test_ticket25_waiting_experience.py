@@ -122,6 +122,11 @@ async def test_browser_retry_reuses_run_id_and_does_not_create_a_new_run(
         timeout=BOOT_TIMEOUT,
     )
     assert await browser_page.is_visible("#run-retry")
+    assert await browser_page.locator("#run-orbit").count() == 0
+    assert await browser_page.text_content("#run-badge") == "Live"
+    assert "interrupted" in (await browser_page.text_content("#run-progress")).lower() or "interrupted" in (await browser_page.text_content("#run-state")).lower()
+    assert await browser_page.locator("#run-crawled").count() == 1
+    assert await browser_page.locator("#run-discovered").count() == 1
     gate.set()
     await browser_page.click("#run-retry")
     await browser_page.wait_for_function(
@@ -129,6 +134,8 @@ async def test_browser_retry_reuses_run_id_and_does_not_create_a_new_run(
         timeout=BOOT_TIMEOUT,
     )
     assert f"run={run_id}" in browser_page.url
+    assert await browser_page.locator("#run-orbit").count() == 0
+    assert await browser_page.text_content("#run-badge") == "Ready"
     assert not any(
         request.method == "POST" and request.url.endswith("/api/runs")
         for request in browser_requests
