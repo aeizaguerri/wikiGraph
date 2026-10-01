@@ -42,16 +42,20 @@
         <div class="c-focus c-run-focus">
           <div id="run-orbit" class="c-orbit orbit-running"><div class="c-orbit-ring"></div><div class="c-orbit-core"><strong id="run-percent">0%</strong><span id="run-phase">building</span></div></div>
           <p id="run-eyebrow" class="c-eyebrow">Building requested Graph</p>
-          <h1 id="run-title">Your Graph</h1>
+          <h1 id="run-title" tabindex="-1">Your Graph</h1>
           <p id="run-detail" class="c-detail">You can leave this tab. The server keeps the run alive.</p>
           <section id="run-waiting" class="run-waiting" hidden aria-live="polite"><p id="run-state" class="run-state"></p><p id="run-progress" class="run-progress"></p><p id="run-recent" class="run-recent"></p></section>
           <div class="c-metrics"><div><strong id="run-crawled">0</strong><span>articles crawled</span></div><div><strong id="run-discovered">0</strong><span>articles discovered</span></div></div>
           <div class="c-actions"><span id="run-live-label" class="c-live-label">Live preview updates below</span><button id="run-retry" class="primary" type="button" hidden>Resume crawl</button></div>
-          <div id="run-preview" class="c-preview"><div id="graph" class="graph c-canvas"></div></div>
+          <div id="run-preview" class="c-preview" role="region" aria-label="Interactive graph">
+            <div id="graph" class="graph c-canvas"></div>
+            <button id="graph-expand" class="graph-view-button" type="button" aria-label="Expand graph" aria-controls="run-preview" aria-expanded="false" hidden>Expand graph</button>
+          </div>
           <p id="notice" class="notice"></p>
         </div>
         <footer class="c-footer"><span>Every run keeps its own link. You can close this tab and return later.</span><a id="run-url" href="#">Open run link</a></footer>
       </section>
+      <button id="graph-collapse" class="graph-view-button graph-view-close" type="button" aria-label="Close expanded graph" hidden>Close</button>
 
       <nav id="lens" class="lens" aria-label="Color encoding">
         <button id="lens-community" class="lens-button" type="button">Community</button>

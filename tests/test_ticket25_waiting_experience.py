@@ -181,6 +181,176 @@ async def test_browser_distinguishes_non_successful_terminal_lifecycles(
     assert await browser_page.is_visible("#run-waiting")
 
 
+async def test_completed_graph_uses_responsive_dimensions_and_cannot_expand_while_running(
+    stub, view_server, browser_page
+):
+    stub.add_page("Responsive graph", links=[(0, "Visible link")])
+    run_id = await create_run(view_server, seed="Responsive graph", depth=1)
+
+    await browser_page.set_viewport_size({"width": 1440, "height": 900})
+    await browser_page.goto(view_url(view_server, run_id))
+    await browser_page.wait_for_function(
+        "() => window.__wikigraph && document.querySelector('#graph canvas')",
+        timeout=BOOT_TIMEOUT,
+    )
+    dimensions = await browser_page.locator("#run-preview").evaluate(
+        "element => ({width: element.getBoundingClientRect().width, height: element.getBoundingClientRect().height, viewportWidth: innerWidth})"
+    )
+    assert dimensions["width"] > 1000
+    assert dimensions["height"] > 300
+    assert dimensions["width"] <= dimensions["viewportWidth"]
+
+    await browser_page.set_viewport_size({"width": 390, "height": 844})
+    await browser_page.wait_for_timeout(100)
+    mobile = await browser_page.evaluate(
+        "() => ({documentWidth: document.documentElement.scrollWidth, viewportWidth: innerWidth, graphWidth: document.querySelector('#run-preview').getBoundingClientRect().width, graphHeight: document.querySelector('#run-preview').getBoundingClientRect().height})"
+    )
+    assert mobile["documentWidth"] <= mobile["viewportWidth"]
+    assert mobile["graphWidth"] <= mobile["viewportWidth"]
+    assert mobile["graphHeight"] > 300
+
+
+async def test_completed_graph_expands_and_returns_by_button_or_escape(
+    stub, view_server, browser_page
+):
+    stub.add_page("Expandable graph", links=[(0, "Navigable link")])
+    run_id = await create_run(view_server, seed="Expandable graph", depth=1)
+    await browser_page.set_viewport_size({"width": 1280, "height": 800})
+    await browser_page.goto(view_url(view_server, run_id))
+    await browser_page.wait_for_function(
+        "() => window.__wikigraph && document.querySelector('#graph canvas')",
+        timeout=BOOT_TIMEOUT,
+    )
+    expand = browser_page.get_by_role("button", name="Expand graph")
+    close = browser_page.get_by_role("button", name="Close expanded graph")
+    await expand.wait_for(state="visible")
+    await browser_page.click("#lens-level")
+    assert await browser_page.get_attribute("#lens-level", "aria-pressed") == "true"
+
+    normal = await browser_page.locator("#run-preview").evaluate(
+        "element => ({width: element.getBoundingClientRect().width, height: element.getBoundingClientRect().height})"
+    )
+    await expand.click()
+    await close.wait_for(state="visible")
+    expanded = await browser_page.locator("#run-preview").evaluate(
+        "element => ({width: element.getBoundingClientRect().width, height: element.getBoundingClientRect().height, viewportWidth: innerWidth, viewportHeight: innerHeight})"
+    )
+    assert expanded["width"] == expanded["viewportWidth"]
+    assert expanded["height"] == expanded["viewportHeight"]
+    assert await browser_page.get_attribute("#lens-level", "aria-pressed") == "true"
+
+    await browser_page.set_viewport_size({"width": 900, "height": 650})
+    await browser_page.wait_for_function(
+        "() => document.querySelector('#graph canvas').getBoundingClientRect().width === innerWidth",
+        timeout=BOOT_TIMEOUT,
+    )
+    resized = await browser_page.locator("#graph canvas").first.evaluate(
+        "element => ({width: element.getBoundingClientRect().width, height: element.getBoundingClientRect().height, viewportWidth: innerWidth, viewportHeight: innerHeight})"
+    )
+    assert resized["width"] == resized["viewportWidth"]
+    assert resized["height"] == resized["viewportHeight"]
+
+    await close.click()
+    await expand.wait_for(state="visible")
+    await browser_page.set_viewport_size({"width": 1280, "height": 800})
+    await browser_page.wait_for_function(
+        "height => Math.abs(document.querySelector('#run-preview').getBoundingClientRect().height - height) < 1",
+        arg=normal["height"],
+        timeout=BOOT_TIMEOUT,
+    )
+    restored = await browser_page.locator("#run-preview").evaluate(
+        "element => ({width: element.getBoundingClientRect().width, height: element.getBoundingClientRect().height})"
+    )
+    assert restored["width"] == normal["width"]
+    assert abs(restored["height"] - normal["height"]) < 1
+
+    await expand.click()
+    await browser_page.keyboard.press("Escape")
+    await expand.wait_for(state="visible")
+    assert await browser_page.evaluate("() => document.activeElement.id") == "graph-expand"
+    assert await browser_page.get_attribute("#lens-level", "aria-pressed") == "true"
+    assert await browser_page.evaluate(
+        "() => window.__wikigraph.graph.hasNode('Navigable link')"
+    )
+
+
+async def test_expanded_graph_keeps_close_clickable_and_traps_keyboard_focus(
+    stub, view_server, browser_page
+):
+    stub.add_page("Focus graph", links=[(0, "Selected article")])
+    stub.add_page("Selected article")
+    run_id = await create_run(view_server, seed="Focus graph", depth=1)
+    await browser_page.set_viewport_size({"width": 1280, "height": 800})
+    await browser_page.goto(view_url(view_server, run_id))
+    await browser_page.wait_for_function(
+        "() => window.__wikigraph && window.__wikigraph.graph.hasNode('Selected article')",
+        timeout=BOOT_TIMEOUT,
+    )
+    await browser_page.evaluate("""() => {
+      const attrs = window.__wikigraph.graph.getNodeAttributes('Selected article');
+      const point = window.__wikigraph.sigma.graphToViewport({x: attrs.x, y: attrs.y});
+      const rect = document.getElementById('graph').getBoundingClientRect();
+      window.__testNodePoint = {x: rect.left + point.x, y: rect.top + point.y};
+    }""")
+    point = await browser_page.evaluate("() => window.__testNodePoint")
+    await browser_page.mouse.click(point["x"], point["y"])
+    await browser_page.wait_for_function(
+        "() => document.getElementById('card-title').textContent === 'Selected article'",
+        timeout=BOOT_TIMEOUT,
+    )
+
+    expand = browser_page.get_by_role("button", name="Expand graph")
+    await expand.click()
+    close = browser_page.get_by_role("button", name="Close expanded graph")
+    await close.wait_for(state="visible")
+    assert await browser_page.evaluate("() => document.activeElement.id") == "graph-collapse"
+    assert await browser_page.get_attribute("#graph-expand", "aria-expanded") == "true"
+
+    allowed = {"graph-collapse", "lens-community", "lens-level", "card-link"}
+    focused = []
+    for _ in range(8):
+        await browser_page.keyboard.press("Tab")
+        focused.append(await browser_page.evaluate("() => document.activeElement.id"))
+    assert set(focused) <= allowed
+    await browser_page.keyboard.press("Shift+Tab")
+    assert await browser_page.evaluate("() => document.activeElement.id") in allowed
+
+    await close.click()
+    assert await expand.is_visible()
+    assert await browser_page.evaluate("() => document.activeElement.id") == "graph-expand"
+    assert await browser_page.get_attribute("#graph-expand", "aria-expanded") == "false"
+    assert await browser_page.evaluate("() => window.__wikigraph.getSelected()") == "Selected article"
+    assert await browser_page.get_attribute("#lens-community", "aria-pressed") == "true"
+
+    await expand.click()
+    await browser_page.keyboard.press("Escape")
+    assert await browser_page.evaluate("() => document.activeElement.id") == "graph-expand"
+    assert await browser_page.evaluate("() => window.__wikigraph.getSelected()") == "Selected article"
+    assert await browser_page.get_attribute("#lens-community", "aria-pressed") == "true"
+
+
+async def test_active_graph_cannot_expand_until_crawl_completes(
+    stub, view_server, browser_page
+):
+    gate = stub.gate("Still crawling")
+    stub.add_page("Still crawling", links=[(0, "After completion")])
+    stub.add_page("After completion")
+    await browser_page.goto(str(view_server.base_url))
+    await browser_page.fill("#launch-seed", "Still crawling")
+    await browser_page.click("#launch-submit")
+    await browser_page.wait_for_function(
+        "() => window.__wikigraph && window.__wikigraph.graph.hasNode('Still crawling')",
+        timeout=BOOT_TIMEOUT,
+    )
+    assert not await browser_page.get_by_role("button", name="Expand graph").is_visible()
+    gate.set()
+    await browser_page.wait_for_function(
+        "() => document.getElementById('run-waiting').hidden && document.getElementById('graph-expand').hidden === false",
+        timeout=BOOT_TIMEOUT,
+    )
+    assert await browser_page.get_by_role("button", name="Expand graph").is_visible()
+
+
 async def test_browser_failed_run_is_not_presented_as_a_graph(
     stub, view_server, view_store, browser_page
 ):

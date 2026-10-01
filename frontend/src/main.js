@@ -37,6 +37,9 @@ const runOrbit = document.getElementById("run-orbit");
 const runBadge = document.getElementById("run-badge");
 const runLiveLabel = document.getElementById("run-live-label");
 const runUrl = document.getElementById("run-url");
+const graphExpandButton = document.getElementById("graph-expand");
+const graphCollapseButton = document.getElementById("graph-collapse");
+const stage = document.getElementById("stage");
 
 const PHYSICS_LABELS = {
   settling: "settling…",
@@ -72,12 +75,58 @@ function syncUrl({ lens = null, run = null }) {
   window.history.replaceState(null, "", url);
 }
 
+function setGraphExpanded(expanded, { restoreFocus = true } = {}) {
+  if (expanded && !stage.classList.contains("graph-complete")) return;
+  stage.classList.toggle("graph-expanded", expanded);
+  graphExpandButton.hidden = expanded || !stage.classList.contains("graph-complete");
+  graphExpandButton.setAttribute("aria-expanded", String(expanded));
+  graphCollapseButton.hidden = !expanded;
+  document.getElementById("run-preview").setAttribute(
+    "aria-label",
+    expanded ? "Expanded interactive graph" : "Interactive graph",
+  );
+  if (expanded) {
+    graphCollapseButton.focus();
+  } else if (restoreFocus && !graphExpandButton.hidden) {
+    graphExpandButton.focus();
+  } else if (!restoreFocus && document.activeElement === graphCollapseButton) {
+    runTitle.focus();
+  }
+}
+
+function expandedGraphFocusables() {
+  return [lensCommunity, lensLevel, infoCard.hidden ? null : cardLink, graphCollapseButton]
+    .filter((element) => element && !element.hidden && element.getClientRects().length > 0);
+}
+
+function handleExpandedKeydown(event) {
+  if (!stage.classList.contains("graph-expanded")) return;
+  if (event.key === "Escape") {
+    event.preventDefault();
+    setGraphExpanded(false);
+    return;
+  }
+  if (event.key !== "Tab") return;
+  const focusables = expandedGraphFocusables();
+  if (!focusables.length) return;
+  const current = focusables.indexOf(document.activeElement);
+  const next = event.shiftKey
+    ? (current <= 0 ? focusables.length - 1 : current - 1)
+    : (current < 0 || current === focusables.length - 1 ? 0 : current + 1);
+  event.preventDefault();
+  focusables[next].focus();
+}
+
 function showView(view) {
   const running = view === "run";
   landingView.hidden = running;
   runView.hidden = !running;
-  const stage = document.getElementById("stage");
   stage.classList.toggle("has-run", running);
+  if (!running) {
+    stage.classList.remove("graph-expanded", "graph-complete");
+    graphExpandButton.hidden = true;
+    graphCollapseButton.hidden = true;
+  }
   if (!running) stage.classList.remove("has-graph");
   document.body.classList.toggle("has-run", running);
 }
@@ -93,7 +142,12 @@ const LIFECYCLE_LABELS = {
 
 function renderRunState(data) {
   showView("run");
-  document.getElementById("stage").classList.toggle("has-graph", data.status === "completed");
+  stage.classList.toggle("has-graph", data.status === "completed");
+  stage.classList.toggle("graph-complete", data.status === "completed");
+  if (data.status !== "completed" && stage.classList.contains("graph-expanded")) {
+    setGraphExpanded(false, { restoreFocus: false });
+  }
+  graphExpandButton.hidden = data.status !== "completed" || stage.classList.contains("graph-expanded");
   waitingBox.hidden = data.status === "completed";
   runState.textContent = LIFECYCLE_LABELS[data.status] ?? `Run status: ${data.status}`;
   runProgress.textContent = `Crawled ${data.crawled} · Discovered ${data.discovered} · Depth ${data.currentDepth}`;
@@ -209,6 +263,10 @@ function mountExperience(graphPayload) {
   runTitle.textContent = graphPayload.seed ?? "Your Graph";
   runUrl.href = window.location.href;
 }
+
+graphExpandButton.addEventListener("click", () => setGraphExpanded(true));
+graphCollapseButton.addEventListener("click", () => setGraphExpanded(false));
+document.addEventListener("keydown", handleExpandedKeydown);
 
 for (const [button, lens] of [
   [lensCommunity, "community"],

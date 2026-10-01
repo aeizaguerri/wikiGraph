@@ -204,6 +204,8 @@ export function createExperience(graphPayload, container, options = {}) {
     labelColor: { color: LABEL_COLOR },
     labelRenderedSizeThreshold: ZOOM_THRESHOLD,
   });
+  const resizeObserver = new ResizeObserver(() => sigma.resize());
+  resizeObserver.observe(container);
 
   // ---- physics lifecycle: settling → static, drag re-heats, then decays ----
   let physicsState = "settling";
@@ -386,6 +388,7 @@ export function createExperience(graphPayload, container, options = {}) {
       }
       if (supervisor) supervisor.kill();
       window.removeEventListener("mouseup", release);
+      resizeObserver.disconnect();
       sigma.kill();
     },
   };
