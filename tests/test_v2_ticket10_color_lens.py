@@ -229,6 +229,7 @@ async def test_legend_names_the_active_encoding_and_its_colors(
     assert len(community_ids) >= 2
 
     await boot_view(browser_page, view_server, run_id)
+    await browser_page.click("#graph-expand")
     legend = await browser_page.evaluate(LEGEND_STATE_JS)
     assert "community" in legend["title"].lower(), legend
     assert [entry["label"] for entry in legend["entries"]] == [
@@ -264,6 +265,7 @@ async def test_legend_folds_gray_communities_into_one_bucket(
     assert 12 in community_ids, community_ids
 
     await boot_view(browser_page, view_server, run_id)
+    await browser_page.click("#graph-expand")
     legend = await browser_page.evaluate(LEGEND_STATE_JS)
     labels = [entry["label"] for entry in legend["entries"]]
     assert labels[-1].startswith("Larger communities"), legend
@@ -283,6 +285,7 @@ async def test_level_lens_stays_honestly_sparse(
     assert levels == {0, 1}, levels
 
     await boot_view(browser_page, view_server, run_id)
+    await browser_page.click("#graph-expand")
     await browser_page.click("#lens-level")
     await browser_page.wait_for_function(
         "() => window.__wikigraph.getLens() === 'level'"

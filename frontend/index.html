@@ -53,18 +53,23 @@
           </div>
           <p id="notice" class="notice"></p>
         </div>
+        <div id="graph-chrome" class="graph-chrome">
+          <nav id="lens" class="lens" aria-label="Color encoding">
+            <button id="lens-community" class="lens-button" type="button">Community</button>
+            <button id="lens-level" class="lens-button" type="button">Level</button>
+          </nav>
+          <aside id="legend" class="legend" aria-live="polite">
+            <p id="legend-title" class="legend-title"></p>
+            <ul id="legend-entries" class="legend-entries"></ul>
+          </aside>
+          <p id="truncation" class="truncation" role="status" hidden>
+            Node cap reached. This Graph is partial.
+          </p>
+        </div>
         <footer class="c-footer"><span>Every run keeps its own link. You can close this tab and return later.</span><a id="run-url" href="#">Open run link</a></footer>
       </section>
       <button id="graph-collapse" class="graph-view-button graph-view-close" type="button" aria-label="Close expanded graph" hidden>Close</button>
 
-      <nav id="lens" class="lens" aria-label="Color encoding">
-        <button id="lens-community" class="lens-button" type="button">Community</button>
-        <button id="lens-level" class="lens-button" type="button">Level</button>
-      </nav>
-      <aside id="legend" class="legend" aria-live="polite">
-        <p id="legend-title" class="legend-title"></p>
-        <ul id="legend-entries" class="legend-entries"></ul>
-      </aside>
       <aside id="info-card" class="info-card" hidden>
         <h2 id="card-title" class="card-title"></h2>
         <ul class="card-facts">
@@ -75,9 +80,6 @@
         <a id="card-link" class="card-link" target="_blank" rel="noreferrer"></a>
       </aside>
       <p id="status" class="status"></p>
-      <p id="truncation" class="truncation" role="status" hidden>
-        Node cap reached. This Graph is partial.
-      </p>
     </main>
     <script type="module" src="/src/main.js"></script>
   </body>
