@@ -162,7 +162,10 @@ def test_startup_schema_validation_retains_all_runtime_probes() -> None:
 
     store.validate_runtime_schema()
 
-    assert len(client.requests) == 10
+    assert len(client.requests) == 11
+    assert client.requests[-1]["url"] == (
+        "https://db.example/rest/v1/rpc/read_crawl_run_snapshot"
+    )
 
 
 def test_readyz_offloads_slow_canonical_probe(monkeypatch: pytest.MonkeyPatch) -> None:

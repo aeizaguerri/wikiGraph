@@ -122,6 +122,8 @@ class CrawlRun:
         cache: ResponseCache | None = None,
         persist_recovery: Callable[["CrawlRun"], None] | None = None,
         checkpoint: CrawlCheckpoint | None = None,
+        owner_token: str | None = None,
+        owner_version: int | None = None,
     ) -> None:
         self.id = run_id
         self.request = request
@@ -143,6 +145,8 @@ class CrawlRun:
         self._persist_recovery = persist_recovery
         self._checkpoint = checkpoint
         self._ownership_lost = False
+        self._owner_token = owner_token
+        self._owner_version = owner_version
         self.retry_state: dict[str, Any] | None = None
         self._started_at = time.perf_counter()
         self._start_usage = process_usage()
@@ -597,6 +601,7 @@ class SupabaseCrawlRunStore:
         key: str | None = None,
         *,
         client: httpx.Client | None = None,
+        async_client: httpx.AsyncClient | None = None,
         rest_path: str = "/rest/v1",
         governor: GlobalWikimediaGovernor = DEFAULT_GOVERNOR,
         cache: ResponseCache | None = None,
@@ -611,6 +616,8 @@ class SupabaseCrawlRunStore:
             raise PersistenceError("Supabase configuration is unavailable.")
         self._client = client or httpx.Client(timeout=20.0)
         self._owns_client = client is None
+        self._async_client = async_client or httpx.AsyncClient(timeout=20.0)
+        self._owns_async_client = async_client is None
         self._governor = governor
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         if heartbeat_interval_seconds <= 0:
@@ -667,7 +674,7 @@ class SupabaseCrawlRunStore:
     def validate_runtime_schema(self) -> None:
         """Verify every table and RPC required by the runtime at startup."""
         self._request(
-            "GET", headers=self._headers(), params={"select": "run_id", "limit": "1"}
+            "GET", headers=self._headers(), params={"select": "run_id,truncated", "limit": "0"}
         )
         for table in (
             "crawl_launch_admission",
@@ -698,6 +705,10 @@ class SupabaseCrawlRunStore:
         )
         self._rpc_request(
             "release_wikimedia_attempt", {"p_request_id": str(uuid.uuid4())}
+        )
+        self._rpc_request(
+            "read_crawl_run_snapshot",
+            {"p_run_id": str(uuid.uuid4()), "p_view": "state"},
         )
 
     def _rpc_request(self, function: str, payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -842,6 +853,8 @@ class SupabaseCrawlRunStore:
             persist_recovery=lambda recovered: self._save_recovery(
                 recovered, owner_token, owner_version
             ),
+            owner_token=owner_token,
+            owner_version=owner_version,
         )
         run.task = asyncio.create_task(
             self._run_owned(run, transport, owner_token, owner_version)
@@ -967,6 +980,44 @@ class SupabaseCrawlRunStore:
         self._runs[run_id] = run
         return run
 
+    def get_local_worker(self, run_id: str) -> CrawlRun | None:
+        """Return an already-local lifecycle worker without reading persistence."""
+        return self._runs.get(run_id)
+
+    async def get_state(self, run_id: str) -> RunStateSnapshot | None:
+        row = await self._read_snapshot_row(run_id, "state")
+        if row is None:
+            return None
+        state = _snapshot_state_from_row(row)
+        self._fence_local_worker(state)
+        return state
+
+    async def get_preview(self, run_id: str) -> RunPreviewSnapshot | None:
+        row = await self._read_snapshot_row(run_id, "preview")
+        if row is None:
+            return None
+        state = _snapshot_state_from_row(row)
+        self._fence_local_worker(state)
+        if state.status is RunStatus.EXPIRED:
+            return RunPreviewSnapshot(state, None, None, None)
+        if state.status is RunStatus.COMPLETED:
+            graph, communities = _graph_snapshot_from_json(row["graph"])
+            return RunPreviewSnapshot(state, None, graph, communities)
+        return RunPreviewSnapshot(
+            state, _checkpoint_snapshot_from_json(row["checkpoint"]), None, None
+        )
+
+    async def get_graph(self, run_id: str) -> RunCompletedGraphSnapshot | None:
+        row = await self._read_snapshot_row(run_id, "graph")
+        if row is None:
+            return None
+        state = _snapshot_state_from_row(row)
+        self._fence_local_worker(state)
+        if state.status is not RunStatus.COMPLETED:
+            return RunCompletedGraphSnapshot(state, None, None)
+        graph, communities = _graph_snapshot_from_json(row["graph"])
+        return RunCompletedGraphSnapshot(state, graph, communities)
+
     async def wait_for_canonical(self, run_id: str) -> CrawlRun | None:
         """Wait for remote ownership to publish a terminal canonical record."""
         while True:
@@ -978,6 +1029,40 @@ class SupabaseCrawlRunStore:
     async def poll_canonical(self, run_id: str) -> CrawlRun | None:
         """Refresh a remote-owned handle without taking or renewing ownership."""
         return await asyncio.to_thread(self.get, run_id)
+
+    async def _read_snapshot_row(self, run_id: str, view: str) -> dict[str, Any] | None:
+        endpoint = self._rest_endpoint("rpc/read_crawl_run_snapshot")
+        try:
+            response = await self._async_client.post(
+                endpoint,
+                headers=self._headers(),
+                json={"p_run_id": run_id, "p_view": view},
+            )
+            response.raise_for_status()
+            body = response.json()
+        except (httpx.HTTPError, OSError, ValueError) as exc:
+            raise PersistenceError("Supabase persistence operation failed.") from exc
+        if not isinstance(body, list) or len(body) > 1:
+            raise PersistenceError("Supabase returned an invalid run snapshot.")
+        if not body:
+            return None
+        if not isinstance(body[0], dict):
+            raise PersistenceError("Supabase returned an invalid run snapshot.")
+        return body[0]
+
+    def _fence_local_worker(self, state: RunStateSnapshot) -> None:
+        active = self._runs.get(state.id)
+        if active is None or active._ownership_lost or active.task is None or active.task.done():
+            return
+        expired = state.status is RunStatus.EXPIRED
+        ownership_changed = (
+            active._owner_token is not None
+            and (state.owner_token != active._owner_token
+                 or state.owner_version != active._owner_version)
+        )
+        if (expired or ownership_changed) and self._runs.get(state.id) is active:
+            active._ownership_lost = True
+            active.task.cancel()
 
     def cleanup_expired(self, now: datetime | None = None) -> int:
         """Remove detailed state through the database-authorized cleanup RPC."""
@@ -1060,6 +1145,8 @@ class SupabaseCrawlRunStore:
             persist_recovery=lambda recovered: self._save_recovery(
                 recovered, owner_token, owner_version
             ),
+            owner_token=owner_token,
+            owner_version=owner_version,
         )
         run.task = asyncio.create_task(
             self._run_owned(run, transport, owner_token, owner_version)
@@ -1203,6 +1290,164 @@ class SupabaseCrawlRunStore:
         await asyncio.gather(*tasks, return_exceptions=True)
         if self._owns_client:
             self._client.close()
+        if self._owns_async_client:
+            await self._async_client.aclose()
+
+
+_RUN_SNAPSHOT_FIELDS = {
+    "run_id", "seed", "language", "depth", "node_cap", "status", "progress",
+    "error", "retry_state", "expires_at", "owner_token", "owner_version",
+    "lease_until", "checkpoint", "graph", "truncated",
+}
+
+
+def _snapshot_state_from_row(row: dict[str, Any]) -> RunStateSnapshot:
+    try:
+        if set(row) != _RUN_SNAPSHOT_FIELDS:
+            raise ValueError("unexpected run snapshot fields")
+        status = RunStatus(row["status"])
+        progress = row["progress"]
+        if not isinstance(progress, dict):
+            raise ValueError("invalid progress")
+        recent = progress["recent"]
+        if not isinstance(recent, list) or not all(isinstance(item, str) for item in recent):
+            raise ValueError("invalid recent progress")
+        retry_value = row["retry_state"]
+        if retry_value is not None and not isinstance(retry_value, dict):
+            raise ValueError("invalid retry state")
+        retry = None
+        if retry_value is not None:
+            attempts = retry_value.get("attempts")
+            retry_after = retry_value.get("retry_after")
+            if attempts is not None and (isinstance(attempts, bool) or not isinstance(attempts, int)):
+                raise ValueError("invalid retry attempts")
+            if retry_after is not None and (isinstance(retry_after, bool) or not isinstance(retry_after, (int, float))):
+                raise ValueError("invalid retry delay")
+            retry = RunRetrySnapshot(attempts, float(retry_after) if retry_after is not None else None)
+        expires_value = row["expires_at"]
+        expires = _snapshot_datetime(expires_value) if expires_value is not None else None
+        owner = row["owner_token"]
+        version = row["owner_version"]
+        if owner is not None and not isinstance(owner, str):
+            raise ValueError("invalid owner token")
+        if version is not None and (isinstance(version, bool) or not isinstance(version, int)):
+            raise ValueError("invalid owner version")
+        request = CrawlRequest(
+            seed=_snapshot_string(row["seed"]),
+            depth=_snapshot_int(row["depth"]),
+            language=_snapshot_string(row["language"]),
+            node_cap=_snapshot_int(row["node_cap"]),
+        )
+        error = row["error"]
+        if error is not None and not isinstance(error, str):
+            raise ValueError("invalid run error")
+        truncated_value = row["truncated"]
+        if status is RunStatus.COMPLETED:
+            truncated = _snapshot_bool(truncated_value)
+        else:
+            if truncated_value is not None:
+                raise ValueError("truncated must be null outside completed status")
+            truncated = None
+        return RunStateSnapshot(
+            id=_snapshot_string(row["run_id"]), request=request, status=status,
+            progress=RunProgressSnapshot(
+                crawled=_snapshot_int(progress["crawled"]),
+                discovered=_snapshot_int(progress["discovered"]),
+                depth=_snapshot_int(progress["depth"]), recent=tuple(recent),
+            ),
+            error=error, retry_state=retry, expires_at=expires,
+            owner_token=owner, owner_version=version, truncated=truncated,
+        )
+    except (KeyError, TypeError, ValueError, OverflowError) as exc:
+        raise PersistenceError("Supabase returned an invalid run snapshot.") from exc
+
+
+def _snapshot_string(value: Any) -> str:
+    if not isinstance(value, str):
+        raise ValueError("expected string")
+    return value
+
+
+def _snapshot_int(value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError("expected integer")
+    return value
+
+
+def _snapshot_datetime(value: Any) -> datetime:
+    if not isinstance(value, str):
+        raise ValueError("expected timestamp")
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        raise ValueError("timestamp must include timezone")
+    return parsed
+
+
+def _checkpoint_snapshot_from_json(value: Any) -> RunCheckpointSnapshot | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise PersistenceError("Supabase returned an invalid run snapshot.")
+    try:
+        nodes = tuple(GraphNode(**node) for node in value["nodes"])
+        edges = tuple(GraphEdge(**edge) for edge in value["edges"])
+        frontier = value["frontier"]
+        next_frontier = value["next_frontier"]
+        current_batch = value["current_batch"]
+        recent = value["recent"]
+        if not all(isinstance(items, list) and all(isinstance(item, str) for item in items)
+                   for items in (frontier, next_frontier, current_batch, recent)):
+            raise ValueError("invalid checkpoint titles")
+        continuation = value["continuation"]
+        if continuation is not None and not isinstance(continuation, str):
+            raise ValueError("invalid continuation")
+        return RunCheckpointSnapshot(
+            level=_snapshot_int(value["level"]), frontier=tuple(frontier),
+            batch_start=_snapshot_int(value["batch_start"]),
+            next_frontier=tuple(next_frontier), current_batch=tuple(current_batch),
+            continuation=continuation, nodes=nodes, edges=edges,
+            truncated=_snapshot_bool(value["truncated"]),
+            crawled=_snapshot_int(value["crawled"]), recent=tuple(recent),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise PersistenceError("Supabase returned an invalid run snapshot.") from exc
+
+
+def _graph_snapshot_from_json(
+    value: Any,
+) -> tuple[RunGraphSnapshot | None, RunCommunitySnapshot | None]:
+    if value is None:
+        return None, None
+    if not isinstance(value, dict):
+        raise PersistenceError("Supabase returned an invalid run snapshot.")
+    try:
+        graph = RunGraphSnapshot(
+            nodes=tuple(GraphNode(**node) for node in value["nodes"]),
+            edges=tuple(GraphEdge(**edge) for edge in value["edges"]),
+            truncated=_snapshot_bool(value["truncated"]),
+            crawled=_snapshot_int(value["crawled"]),
+            discovered=_snapshot_int(value["discovered"]),
+        )
+        ids_value = value["community_ids"]
+        if isinstance(ids_value, dict):
+            ids = tuple(sorted((str(key), _snapshot_int(item)) for key, item in ids_value.items()))
+        elif isinstance(ids_value, list):
+            ids = tuple(sorted((str(pair[0]), _snapshot_int(pair[1])) for pair in ids_value))
+        else:
+            raise ValueError("invalid community ids")
+        communities = RunCommunitySnapshot(
+            ids=ids, count=_snapshot_int(value["community_count"]),
+            modularity=float(value["modularity"]),
+        )
+        return graph, communities
+    except (KeyError, TypeError, ValueError, OverflowError, IndexError) as exc:
+        raise PersistenceError("Supabase returned an invalid run snapshot.") from exc
+
+
+def _snapshot_bool(value: Any) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError("expected boolean")
+    return value
 
 
 def _state_snapshot(run: CrawlRun) -> RunStateSnapshot:
