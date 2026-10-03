@@ -77,6 +77,13 @@ def test_service_role_can_read_runtime_schema_and_call_required_rpcs() -> None:
             json={"p_request_id": "00000000-0000-0000-0000-000000000000"},
         )
         assert release.status_code in {200, 204}
+
+        snapshot = database.post(
+            f"{POSTGREST_URL}/rpc/read_crawl_run_snapshot",
+            headers=headers,
+            json={"p_run_id": "missing-role-probe", "p_view": "state"},
+        )
+        assert snapshot.status_code == 200 and snapshot.json() == []
     finally:
         database.close()
 
@@ -100,5 +107,11 @@ def test_browser_roles_cannot_read_private_runtime_tables(role_env: str) -> None
             json={"p_now": "1970-01-01T00:00:00+00:00"},
         )
         assert response.status_code in {401, 403}
+        snapshot = database.post(
+            f"{POSTGREST_URL}/rpc/read_crawl_run_snapshot",
+            headers=_headers(token),
+            json={"p_run_id": "missing-role-probe", "p_view": "state"},
+        )
+        assert snapshot.status_code in {401, 403}
     finally:
         database.close()
