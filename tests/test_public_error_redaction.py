@@ -81,9 +81,6 @@ async def test_legacy_stored_errors_and_sse_history_are_redacted() -> None:
 
 async def test_generic_persistence_handler_failure_uses_safe_message() -> None:
     class FailingStore(InMemoryCrawlRunStore):
-        def get(self, run_id: str):
-            raise PersistenceError(f"database failure at {PRIVATE_URL}")
-
         async def get_state(self, run_id: str):
             raise PersistenceError(f"database failure at {PRIVATE_URL}")
 

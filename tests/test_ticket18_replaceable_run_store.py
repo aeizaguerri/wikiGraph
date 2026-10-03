@@ -23,6 +23,7 @@ class RecordingRunStore:
         self._delegate = InMemoryCrawlRunStore()
         self.lookups: list[str] = []
         self.purpose_reads: list[tuple[str, str]] = []
+        self.worker_accesses: list[str] = []
         self.shutdown_called = False
 
     def start_run(
@@ -33,6 +34,10 @@ class RecordingRunStore:
     def get(self, run_id: str) -> CrawlRunHandle | None:
         self.lookups.append(run_id)
         return self._delegate.get(run_id)
+
+    def get_local_worker(self, run_id: str) -> CrawlRunHandle | None:
+        self.worker_accesses.append(run_id)
+        return self._delegate.get_local_worker(run_id)
 
     async def get_state(self, run_id: str) -> RunStateSnapshot | None:
         self.purpose_reads.append(("state", run_id))
@@ -83,5 +88,6 @@ async def test_api_uses_an_injected_store_without_changing_run_experience(
         "preview",
         "graph",
     }
-    assert store.lookups == [run_id]  # Legacy SSE still uses get() until D6.
+    assert store.lookups == []
+    assert store.worker_accesses
     assert store.shutdown_called

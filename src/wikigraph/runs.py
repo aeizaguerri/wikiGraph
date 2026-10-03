@@ -1018,18 +1018,6 @@ class SupabaseCrawlRunStore:
         graph, communities = _graph_snapshot_from_json(row["graph"])
         return RunCompletedGraphSnapshot(state, graph, communities)
 
-    async def wait_for_canonical(self, run_id: str) -> CrawlRun | None:
-        """Wait for remote ownership to publish a terminal canonical record."""
-        while True:
-            run = await asyncio.to_thread(self.get, run_id)
-            if run is None or run.status is not RunStatus.RUNNING:
-                return run
-            await asyncio.sleep(self._remote_poll_seconds)
-
-    async def poll_canonical(self, run_id: str) -> CrawlRun | None:
-        """Refresh a remote-owned handle without taking or renewing ownership."""
-        return await asyncio.to_thread(self.get, run_id)
-
     async def _read_snapshot_row(self, run_id: str, view: str) -> dict[str, Any] | None:
         endpoint = self._rest_endpoint("rpc/read_crawl_run_snapshot")
         try:

@@ -36,6 +36,7 @@ from wikigraph.runs import (
     RunCompletedGraphSnapshot,
     RunCommunitySnapshot,
     RunGraphSnapshot,
+    RunEvent,
     RunStateSnapshot,
     LaunchAdmissionDecision,
     LaunchAdmissionStore,
@@ -495,14 +496,19 @@ def create_app(
     @app.get("/api/runs/{run_id}/events")
     async def run_events(run_id: str) -> StreamingResponse:
         try:
-            run = _require_run(store, run_id)
+            state = await store.get_state(run_id)
         except PersistenceError as exc:
             logger.exception("Crawl run event lookup failed")
             raise _error(503, "persistence_unavailable", "Crawl persistence is unavailable. Try again later.") from exc
+        if state is None:
+            raise _error(404, "unknown_run", "No crawl run with that identifier.")
+        if state.status is RunStatus.EXPIRED:
+            raise _error(410, "run_expired", "This crawl run has expired and its detailed state was removed.")
+        worker = _matching_local_worker(store, state)
         stream = (
-            _remote_event_stream(store, run_id, run)
-            if isinstance(store, SupabaseCrawlRunStore) and getattr(run, "task", None) is None
-            else _event_stream(run)
+            _canonical_local_event_stream(store, run_id, worker, state)
+            if worker is not None
+            else _remote_event_stream(store, run_id, state)
         )
         return StreamingResponse(
             stream,
@@ -597,13 +603,6 @@ def create_app(
     return app
 
 
-def _require_run(store: CrawlRunStore, run_id: str) -> CrawlRunHandle:
-    run = store.get(run_id)
-    if run is None:
-        raise _error(404, "unknown_run", "No crawl run with that identifier.")
-    return run
-
-
 def _state_out(state: RunStateSnapshot) -> RunStateOut:
     progress = state.progress
     return RunStateOut(
@@ -677,6 +676,53 @@ def _raise_graph_status(state: RunStateSnapshot) -> None:
     raise _error(409, "run_failed", public_run_error(state.status, state.error) or "The crawl run failed.")
 
 
+def _matching_local_worker(
+    store: CrawlRunStore, state: RunStateSnapshot
+) -> CrawlRunHandle | None:
+    lookup = getattr(store, "get_local_worker", None)
+    run = lookup(state.id) if lookup is not None else None
+    if run is None or getattr(run, "_ownership_lost", False):
+        return None
+    if isinstance(store, SupabaseCrawlRunStore):
+        if (
+            state.owner_token != getattr(run, "_owner_token", None)
+            or state.owner_version != getattr(run, "_owner_version", None)
+        ):
+            return None
+    return run
+
+
+def _state_progress(state: RunStateSnapshot) -> dict[str, Any]:
+    progress = state.progress
+    return {
+        "crawled": progress.crawled,
+        "discovered": progress.discovered,
+        "depth": progress.depth,
+        "recent": list(progress.recent),
+    }
+
+
+def _state_terminal_event(state: RunStateSnapshot) -> str | None:
+    event_type = {
+        RunStatus.COMPLETED: "completed",
+        RunStatus.FAILED: "failed",
+        RunStatus.RECOVERABLE: "recoverable",
+        RunStatus.OVERLOAD_WAITING: "overload_waiting",
+        RunStatus.EXPIRED: "expired",
+    }.get(state.status)
+    if event_type is None:
+        return None
+    payload: dict[str, Any] = {}
+    if event_type == "completed" and isinstance(state.truncated, bool):
+        payload["truncated"] = state.truncated
+    if event_type != "completed" and state.error:
+        payload["error"] = public_run_error(state.status, state.error)
+    if event_type == "overload_waiting" and state.retry_state is not None:
+        if state.retry_state.retry_after is not None:
+            payload["retryAfter"] = state.retry_state.retry_after
+    return f"event: {event_type}\ndata: {json.dumps(payload)}\n\n"
+
+
 async def _event_stream(run: CrawlRunHandle) -> AsyncIterator[str]:
     queue = run.subscribe()
     try:
@@ -695,49 +741,108 @@ async def _event_stream(run: CrawlRunHandle) -> AsyncIterator[str]:
         run.unsubscribe(queue)
 
 
-async def _remote_event_stream(
-    store: SupabaseCrawlRunStore, run_id: str, run: CrawlRunHandle
+async def _canonical_local_event_stream(
+    store: CrawlRunStore,
+    run_id: str,
+    run: CrawlRunHandle,
+    initial: RunStateSnapshot,
 ) -> AsyncIterator[str]:
-    """Poll canonical progress/status for a run owned by another process."""
-    previous_progress: dict[str, Any] = {}
-    previous_status: RunStatus | None = None
-    last_heartbeat = asyncio.get_running_loop().time()
+    queue = run.subscribe()
+    cadence = max(0.01, _run_poll_interval(store))
+    current = initial
+    loop = asyncio.get_running_loop()
+    last_heartbeat = loop.time()
+
+    async def canonical() -> RunStateSnapshot | None:
+        return await store.get_state(run_id)
+
     try:
         while True:
-            if previous_status is not None:
-                await asyncio.sleep(store._remote_poll_seconds)
-            current = await store.poll_canonical(run_id)
-            if current is None:
-                yield "event: error\ndata: {\"code\":\"run_unavailable\"}\n\n"
+            try:
+                event = await asyncio.wait_for(queue.get(), timeout=cadence)
+            except TimeoutError:
+                latest = await canonical()
+                if latest is None:
+                    yield 'event: error\ndata: {"code":"run_unavailable"}\n\n'
+                    return
+                current = latest
+                if current.status is RunStatus.EXPIRED:
+                    yield _state_terminal_event(current) or "event: expired\\ndata: {}\\n\\n"
+                    return
+                if _matching_local_worker(store, current) is None:
+                    async for output in _remote_event_stream(store, run_id, current):
+                        yield output
+                    return
+                now = loop.time()
+                if now - last_heartbeat >= SSE_HEARTBEAT_SECONDS:
+                    last_heartbeat = now
+                    yield ": ping\\n\\n"
+                continue
+            if event.type in TERMINAL_EVENT_TYPES:
+                latest = await canonical()
+                if latest is None:
+                    yield 'event: error\ndata: {"code":"run_unavailable"}\n\n'
+                    return
+                current = latest
+                if current.status is RunStatus.EXPIRED:
+                    yield _state_terminal_event(current) or "event: expired\\ndata: {}\\n\\n"
+                    return
+                if _matching_local_worker(store, current) is None:
+                    async for output in _remote_event_stream(store, run_id, current):
+                        yield output
+                    return
+            safe_event = (
+                RunEvent(
+                    "completed",
+                    {"truncated": current.truncated}
+                    if isinstance(current.truncated, bool)
+                    else {},
+                )
+                if event.type == "completed" and current.status is RunStatus.COMPLETED
+                else public_event(event)
+            )
+            yield f"event: {safe_event.type}\ndata: {json.dumps(safe_event.data)}\n\n"
+            if event.type in TERMINAL_EVENT_TYPES:
                 return
-            if current.progress != previous_progress:
-                previous_progress = dict(current.progress)
-                yield f"event: progress\ndata: {json.dumps(previous_progress)}\n\n"
+    except PersistenceError:
+        yield 'event: error\ndata: {"code":"persistence_unavailable"}\n\n'
+    finally:
+        run.unsubscribe(queue)
+
+
+async def _remote_event_stream(
+    store: CrawlRunStore, run_id: str, initial: RunStateSnapshot
+) -> AsyncIterator[str]:
+    """Deliver remote progress from canonical state-only snapshots."""
+    previous_progress: dict[str, Any] | None = None
+    previous_status: RunStatus | None = None
+    last_heartbeat = asyncio.get_running_loop().time()
+    current: RunStateSnapshot | None = initial
+    try:
+        while current is not None:
+            progress = _state_progress(current)
+            if progress != previous_progress:
+                previous_progress = progress
+                yield f"event: progress\ndata: {json.dumps(progress)}\n\n"
             if current.status is not previous_status:
                 previous_status = current.status
-                event_type = {
-                    RunStatus.COMPLETED: "completed",
-                    RunStatus.FAILED: "failed",
-                    RunStatus.RECOVERABLE: "recoverable",
-                    RunStatus.OVERLOAD_WAITING: "overload_waiting",
-                    RunStatus.EXPIRED: "expired",
-                }.get(current.status)
-                if event_type is not None:
-                    payload: dict[str, Any] = {"error": public_run_error(current.status, current.error)} if current.error else {}
-                    if event_type == "completed":
-                        payload = {"truncated": current.truncated}
-                    yield f"event: {event_type}\ndata: {json.dumps(payload)}\n\n"
+                terminal = _state_terminal_event(current)
+                if terminal is not None:
+                    yield terminal
                     return
-            now = asyncio.get_running_loop().time()
             if current.status is not RunStatus.RUNNING:
                 return
+            now = asyncio.get_running_loop().time()
             if now - last_heartbeat >= SSE_HEARTBEAT_SECONDS:
                 last_heartbeat = now
                 yield ": ping\n\n"
+            await asyncio.sleep(_run_poll_interval(store))
+            current = await store.get_state(run_id)
+            if current is None:
+                yield 'event: error\ndata: {"code":"run_unavailable"}\n\n'
+                return
     except PersistenceError:
-        # An established stream cannot change its HTTP status; terminate rather
-        # than inventing progress or presenting a partial Graph as authoritative.
-        yield "event: error\ndata: {\"code\":\"persistence_unavailable\"}\n\n"
+        yield 'event: error\ndata: {"code":"persistence_unavailable"}\n\n'
         return
 
 
