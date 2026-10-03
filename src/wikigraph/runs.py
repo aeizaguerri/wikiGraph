@@ -292,6 +292,80 @@ class CrawlRunHandle(Protocol):
     async def wait_done(self) -> None: ...
 
 
+@dataclass(frozen=True)
+class RunProgressSnapshot:
+    crawled: int
+    discovered: int
+    depth: int
+    recent: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class RunRetrySnapshot:
+    attempts: int | None
+    retry_after: float | None
+
+
+@dataclass(frozen=True)
+class RunStateSnapshot:
+    id: str
+    request: CrawlRequest
+    status: RunStatus
+    progress: RunProgressSnapshot
+    error: str | None
+    retry_state: RunRetrySnapshot | None
+    expires_at: datetime | None
+    owner_token: str | None = None
+    owner_version: int | None = None
+    truncated: bool | None = None
+
+
+@dataclass(frozen=True)
+class RunCheckpointSnapshot:
+    level: int
+    frontier: tuple[str, ...]
+    batch_start: int
+    next_frontier: tuple[str, ...]
+    current_batch: tuple[str, ...]
+    continuation: str | None
+    nodes: tuple[GraphNode, ...]
+    edges: tuple[GraphEdge, ...]
+    truncated: bool
+    crawled: int
+    recent: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class RunCommunitySnapshot:
+    ids: tuple[tuple[str, int], ...]
+    count: int
+    modularity: float
+
+
+@dataclass(frozen=True)
+class RunGraphSnapshot:
+    nodes: tuple[GraphNode, ...]
+    edges: tuple[GraphEdge, ...]
+    truncated: bool
+    crawled: int
+    discovered: int
+
+
+@dataclass(frozen=True)
+class RunPreviewSnapshot:
+    state: RunStateSnapshot
+    checkpoint: RunCheckpointSnapshot | None
+    graph: RunGraphSnapshot | None
+    communities: RunCommunitySnapshot | None
+
+
+@dataclass(frozen=True)
+class RunCompletedGraphSnapshot:
+    state: RunStateSnapshot
+    graph: RunGraphSnapshot | None
+    communities: RunCommunitySnapshot | None
+
+
 class CrawlRunStore(Protocol):
     """Domain operations needed by the API to own Crawl run lifecycles."""
 
@@ -304,6 +378,14 @@ class CrawlRunStore(Protocol):
     ) -> CrawlRunHandle: ...
 
     def get(self, run_id: str) -> CrawlRunHandle | None: ...
+
+    def get_local_worker(self, run_id: str) -> CrawlRunHandle | None: ...
+
+    async def get_state(self, run_id: str) -> RunStateSnapshot | None: ...
+
+    async def get_preview(self, run_id: str) -> RunPreviewSnapshot | None: ...
+
+    async def get_graph(self, run_id: str) -> RunCompletedGraphSnapshot | None: ...
 
     def healthcheck(self) -> None: ...
 
@@ -341,6 +423,36 @@ class InMemoryCrawlRunStore:
 
     def get(self, run_id: str) -> CrawlRun | None:
         return self._runs.get(run_id)
+
+    def get_local_worker(self, run_id: str) -> CrawlRun | None:
+        return self._runs.get(run_id)
+
+    async def get_state(self, run_id: str) -> RunStateSnapshot | None:
+        run = self._runs.get(run_id)
+        return _state_snapshot(run) if run is not None else None
+
+    async def get_preview(self, run_id: str) -> RunPreviewSnapshot | None:
+        run = self._runs.get(run_id)
+        if run is None:
+            return None
+        state = _state_snapshot(run)
+        if run.status is RunStatus.EXPIRED:
+            return RunPreviewSnapshot(state, None, None, None)
+        if run.status is RunStatus.COMPLETED:
+            graph, communities = _completed_payload(run)
+            return RunPreviewSnapshot(state, None, graph, communities)
+        checkpoint = _checkpoint_snapshot(run._checkpoint)
+        return RunPreviewSnapshot(state, checkpoint, None, None)
+
+    async def get_graph(self, run_id: str) -> RunCompletedGraphSnapshot | None:
+        run = self._runs.get(run_id)
+        if run is None:
+            return None
+        state = _state_snapshot(run)
+        if run.status is not RunStatus.COMPLETED:
+            return RunCompletedGraphSnapshot(state, None, None)
+        graph, communities = _completed_payload(run)
+        return RunCompletedGraphSnapshot(state, graph, communities)
 
     def healthcheck(self) -> None:
         """Local tests have no external persistence dependency to verify."""
@@ -1091,6 +1203,89 @@ class SupabaseCrawlRunStore:
         await asyncio.gather(*tasks, return_exceptions=True)
         if self._owns_client:
             self._client.close()
+
+
+def _state_snapshot(run: CrawlRun) -> RunStateSnapshot:
+    progress = run.progress
+    retry_state = run.retry_state
+    return RunStateSnapshot(
+        id=run.id,
+        request=run.request,
+        status=run.status,
+        progress=RunProgressSnapshot(
+            crawled=int(progress.get("crawled", 0)),
+            discovered=int(progress.get("discovered", 0)),
+            depth=int(progress.get("depth", 0)),
+            recent=tuple(str(title) for title in progress.get("recent", ())),
+        ),
+        error=run.error,
+        retry_state=(
+            RunRetrySnapshot(
+                attempts=(
+                    int(retry_state["attempts"])
+                    if retry_state.get("attempts") is not None
+                    else None
+                ),
+                retry_after=(
+                    float(retry_state["retry_after"])
+                    if retry_state.get("retry_after") is not None
+                    else None
+                ),
+            )
+            if retry_state is not None
+            else None
+        ),
+        # The in-memory store has no retention clock or expiry policy.
+        expires_at=None,
+        truncated=(
+            run.result.truncated
+            if run.status is RunStatus.COMPLETED
+            and run.result is not None
+            and isinstance(run.result.truncated, bool)
+            else None
+        ),
+    )
+
+
+def _checkpoint_snapshot(
+    checkpoint: CrawlCheckpoint | None,
+) -> RunCheckpointSnapshot | None:
+    if checkpoint is None:
+        return None
+    return RunCheckpointSnapshot(
+        level=checkpoint.level,
+        frontier=tuple(checkpoint.frontier),
+        batch_start=checkpoint.batch_start,
+        next_frontier=tuple(checkpoint.next_frontier),
+        current_batch=tuple(checkpoint.current_batch),
+        continuation=checkpoint.continuation,
+        nodes=tuple(checkpoint.nodes),
+        edges=tuple(checkpoint.edges),
+        truncated=checkpoint.truncated,
+        crawled=checkpoint.crawled,
+        recent=tuple(checkpoint.recent),
+    )
+
+
+def _completed_payload(
+    run: CrawlRun,
+) -> tuple[RunGraphSnapshot | None, RunCommunitySnapshot | None]:
+    if run.result is None or run.communities is None:
+        return None, None
+    return (
+        RunGraphSnapshot(
+            nodes=tuple(run.result.nodes),
+            edges=tuple(run.result.edges),
+            truncated=run.result.truncated,
+            crawled=run.result.crawled,
+            discovered=run.result.discovered,
+        ),
+        RunCommunitySnapshot(
+            ids=tuple(sorted(run.communities.ids.items())),
+            count=run.communities.count,
+            modularity=run.communities.modularity,
+        ),
+    )
 
 
 def _progress_json(progress: Progress) -> dict[str, Any]:
