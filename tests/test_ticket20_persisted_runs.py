@@ -26,6 +26,44 @@ class PostgrestRuns:
     def transport(self) -> httpx.MockTransport:
         return httpx.MockTransport(self.handle)
 
+    def async_transport(self) -> httpx.MockTransport:
+        return httpx.MockTransport(self.handle_async)
+
+    async def handle_async(self, request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/rpc/read_crawl_run_snapshot"):
+            args = json.loads(request.content)
+            run_id = args["p_run_id"]
+            row = self.rows.get(run_id)
+            if row is None:
+                return httpx.Response(200, json=[])
+            view = args["p_view"]
+            projected = {
+                "run_id": row["run_id"],
+                "seed": row["seed"],
+                "language": row["language"],
+                "depth": row["depth"],
+                "node_cap": row["node_cap"],
+                "status": row["status"],
+                "progress": row["progress"],
+                "error": row.get("error"),
+                "retry_state": row.get("retry_state"),
+                "expires_at": "2026-10-25T00:00:00+00:00",
+                "owner_token": row.get("owner_token"),
+                "owner_version": row.get("owner_version"),
+                "lease_until": "2026-09-25T00:00:00+00:00" if row.get("owner_token") else None,
+                "checkpoint": row.get("checkpoint") if view == "preview" and row["status"] != "completed" else None,
+                "graph": row.get("graph") if view in {"preview", "graph"} and row["status"] == "completed" else None,
+                "truncated": (
+                    row["graph"].get("truncated")
+                    if row["status"] == "completed"
+                    and isinstance(row.get("graph"), dict)
+                    and isinstance(row["graph"].get("truncated"), bool)
+                    else None
+                ),
+            }
+            return httpx.Response(200, json=[projected])
+        return httpx.Response(405)
+
     def handle(self, request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/rpc/create_owned_crawl_run"):
             args = json.loads(request.content)
@@ -78,38 +116,39 @@ async def test_completed_graph_is_reopened_from_a_fresh_store(
 ) -> None:
     stub.add_page("Hub", links=[(0, "Leaf")])
     database = PostgrestRuns()
-
-    def store() -> SupabaseCrawlRunStore:
-        return SupabaseCrawlRunStore(
-            "https://supabase.test",
-            "server-only-test-key",
-            client=httpx.Client(transport=database.transport()),
-            governor=GlobalWikimediaGovernor(DeterministicClock()),
-        )
-
-    first = create_app(
-        mediawiki_transport=stub.transport,
-        run_store=store(),
-    )
-    async with first.router.lifespan_context(first):
-        async with httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=first), base_url="http://test"
-        ) as client:
-            response = await client.post(
-                "/api/runs", json={"seed": "Hub", "depth": 1, "language": "es"}
+    async with httpx.AsyncClient(transport=database.async_transport()) as async_client:
+        def store() -> SupabaseCrawlRunStore:
+            return SupabaseCrawlRunStore(
+                "https://supabase.test",
+                "server-only-test-key",
+                client=httpx.Client(transport=database.transport()),
+                async_client=async_client,
+                governor=GlobalWikimediaGovernor(DeterministicClock()),
             )
-            run_id = response.json()["runId"]
-            await asyncio.sleep(0.05)
-            events = await collect_events(client, run_id)
-            assert events[-1]["type"] == "completed"
 
-    second = create_app(mediawiki_transport=stub.transport, run_store=store())
-    async with second.router.lifespan_context(second):
-        async with httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=second), base_url="http://test"
-        ) as client:
-            reopened = await fetch_graph(client, run_id)
-            replayed = await collect_events(client, run_id)
+        first = create_app(
+            mediawiki_transport=stub.transport,
+            run_store=store(),
+        )
+        async with first.router.lifespan_context(first):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=first), base_url="http://test"
+            ) as client:
+                response = await client.post(
+                    "/api/runs", json={"seed": "Hub", "depth": 1, "language": "es"}
+                )
+                run_id = response.json()["runId"]
+                await asyncio.sleep(0.05)
+                events = await collect_events(client, run_id)
+                assert events[-1]["type"] == "completed"
+
+        second = create_app(mediawiki_transport=stub.transport, run_store=store())
+        async with second.router.lifespan_context(second):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=second), base_url="http://test"
+            ) as client:
+                reopened = await fetch_graph(client, run_id)
+                replayed = await collect_events(client, run_id)
 
     assert reopened["runId"] == run_id
     assert {node["title"] for node in reopened["nodes"]} == {"Hub", "Leaf"}

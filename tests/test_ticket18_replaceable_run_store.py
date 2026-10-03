@@ -7,7 +7,13 @@ import httpx
 from tests.helpers import collect_events, fetch_graph
 from tests.stub import FakeMediaWiki
 from wikigraph.crawler import CrawlRequest
-from wikigraph.runs import CrawlRunHandle, InMemoryCrawlRunStore
+from wikigraph.runs import (
+    CrawlRunHandle,
+    InMemoryCrawlRunStore,
+    RunCompletedGraphSnapshot,
+    RunPreviewSnapshot,
+    RunStateSnapshot,
+)
 
 
 class RecordingRunStore:
@@ -16,6 +22,7 @@ class RecordingRunStore:
     def __init__(self) -> None:
         self._delegate = InMemoryCrawlRunStore()
         self.lookups: list[str] = []
+        self.purpose_reads: list[tuple[str, str]] = []
         self.shutdown_called = False
 
     def start_run(
@@ -26,6 +33,18 @@ class RecordingRunStore:
     def get(self, run_id: str) -> CrawlRunHandle | None:
         self.lookups.append(run_id)
         return self._delegate.get(run_id)
+
+    async def get_state(self, run_id: str) -> RunStateSnapshot | None:
+        self.purpose_reads.append(("state", run_id))
+        return await self._delegate.get_state(run_id)
+
+    async def get_preview(self, run_id: str) -> RunPreviewSnapshot | None:
+        self.purpose_reads.append(("preview", run_id))
+        return await self._delegate.get_preview(run_id)
+
+    async def get_graph(self, run_id: str) -> RunCompletedGraphSnapshot | None:
+        self.purpose_reads.append(("graph", run_id))
+        return await self._delegate.get_graph(run_id)
 
     async def shutdown(self) -> None:
         self.shutdown_called = True
@@ -52,9 +71,17 @@ async def test_api_uses_an_injected_store_without_changing_run_experience(
             assert response.status_code == 201
             run_id = response.json()["runId"]
             events = await collect_events(client, run_id)
+            preview_response = await client.get(f"/api/runs/{run_id}/preview")
             graph = await fetch_graph(client, run_id)
 
     assert events[-1] == {"type": "completed", "data": {"truncated": False}}
+    assert preview_response.status_code == 200
+    assert {node["title"] for node in preview_response.json()["nodes"]} == {"Hub", "Leaf"}
     assert {node["title"] for node in graph["nodes"]} == {"Hub", "Leaf"}
-    assert store.lookups == [run_id, run_id]
+    assert {purpose for purpose, found_id in store.purpose_reads if found_id == run_id} == {
+        "state",
+        "preview",
+        "graph",
+    }
+    assert store.lookups == [run_id]  # Legacy SSE still uses get() until D6.
     assert store.shutdown_called

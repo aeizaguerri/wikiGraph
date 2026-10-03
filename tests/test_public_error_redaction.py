@@ -84,6 +84,9 @@ async def test_generic_persistence_handler_failure_uses_safe_message() -> None:
         def get(self, run_id: str):
             raise PersistenceError(f"database failure at {PRIVATE_URL}")
 
+        async def get_state(self, run_id: str):
+            raise PersistenceError(f"database failure at {PRIVATE_URL}")
+
     app = create_app(run_store=FailingStore())
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://test"

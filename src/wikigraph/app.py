@@ -33,6 +33,10 @@ from wikigraph.runs import (
     CrawlRunHandle,
     CrawlRunStore,
     InMemoryCrawlRunStore,
+    RunCompletedGraphSnapshot,
+    RunCommunitySnapshot,
+    RunGraphSnapshot,
+    RunStateSnapshot,
     LaunchAdmissionDecision,
     LaunchAdmissionStore,
     PersistenceError,
@@ -509,60 +513,47 @@ def create_app(
     @app.get("/api/runs/{run_id}", response_model=RunStateOut)
     async def run_state(run_id: str) -> RunStateOut:
         try:
-            run = _require_run(store, run_id)
+            state = await store.get_state(run_id)
         except PersistenceError as exc:
             logger.exception("Crawl run state lookup failed")
             raise _error(503, "persistence_unavailable", "Crawl persistence is unavailable. Try again later.") from exc
-        if run.status is RunStatus.EXPIRED:
+        if state is None:
+            raise _error(404, "unknown_run", "No crawl run with that identifier.")
+        if state.status is RunStatus.EXPIRED:
             raise _error(
                 410,
                 "run_expired",
                 "This crawl run has expired and its detailed state was removed.",
             )
-        progress = run.progress
-        retry_after = None
-        if run.retry_state is not None:
-            value = run.retry_state.get("retry_after")
-            retry_after = float(value) if isinstance(value, (int, float)) else None
-        return RunStateOut(
-            run_id=run.id,
-            seed=run.request.seed,
-            language=run.request.language,
-            depth=run.request.depth,
-            node_cap=run.request.node_cap,
-            status=run.status.value,
-            crawled=int(progress.get("crawled", 0)),
-            discovered=int(progress.get("discovered", 1)),
-            current_depth=int(progress.get("depth", 0)),
-            recent=[str(item) for item in progress.get("recent", [])],
-            error=public_run_error(run.status, run.error),
-            retry_after=retry_after,
-        )
+        return _state_out(state)
 
     @app.get("/api/runs/{run_id}/preview", response_model=PreviewOut)
     async def run_preview(run_id: str) -> PreviewOut:
         try:
-            run = _require_run(store, run_id)
+            preview = await store.get_preview(run_id)
         except PersistenceError as exc:
             logger.exception("Crawl run preview lookup failed")
             raise _error(503, "persistence_unavailable", "Crawl persistence is unavailable. Try again later.") from exc
-        if run.status is RunStatus.EXPIRED:
+        if preview is None:
+            raise _error(404, "unknown_run", "No crawl run with that identifier.")
+        state = preview.state
+        if state.status is RunStatus.EXPIRED:
             raise _error(
                 410,
                 "run_expired",
                 "This crawl run has expired and its detailed state was removed.",
             )
-        if run.result is not None and run.communities is not None:
-            graph = _graph_out(run, complete=True)
+        if preview.graph is not None and preview.communities is not None:
+            graph = _snapshot_graph_out(state, preview.graph, preview.communities)
             return PreviewOut(**graph.model_dump(), complete=True)
-        checkpoint = getattr(run, "_checkpoint", None)
+        checkpoint = preview.checkpoint
         if checkpoint is None:
             raise _error(409, "preview_unavailable", "No committed preview is available yet.")
         return PreviewOut(
-            run_id=run.id,
-            seed=run.request.seed,
-            language=run.request.language,
-            depth=run.request.depth,
+            run_id=state.id,
+            seed=state.request.seed,
+            language=state.request.language,
+            depth=state.request.depth,
             truncated=checkpoint.truncated,
             nodes=[GraphNodeOut(title=node.title, level=node.level, is_seed=node.is_seed, community_id=0) for node in checkpoint.nodes],
             edges=[GraphEdgeOut(source=edge.source, target=edge.target) for edge in checkpoint.edges],
@@ -576,78 +567,31 @@ def create_app(
     @app.get("/api/runs/{run_id}/graph")
     async def run_graph(run_id: str) -> GraphOut:
         try:
-            run = _require_run(store, run_id)
-        except PersistenceError as exc:
-            logger.exception("Crawl run graph lookup failed")
-            raise _error(503, "persistence_unavailable", "Crawl persistence is unavailable. Try again later.") from exc
-        try:
-            if isinstance(store, SupabaseCrawlRunStore) and getattr(run, "task", None) is None:
-                canonical = await store.wait_for_canonical(run_id)
-                if canonical is None:
+            state = await store.get_state(run_id)
+            if state is None:
+                raise _error(404, "unknown_run", "No crawl run with that identifier.")
+            while True:
+                while state.status is RunStatus.RUNNING:
+                    await asyncio.sleep(_run_poll_interval(store))
+                    state = await store.get_state(run_id)
+                    if state is None:
+                        raise _error(404, "unknown_run", "No crawl run with that identifier.")
+                if state.status is not RunStatus.COMPLETED:
+                    _raise_graph_status(state)
+                graph = await store.get_graph(run_id)
+                if graph is None:
                     raise _error(404, "unknown_run", "No crawl run with that identifier.")
-                run = canonical
-            else:
-                await run.wait_done()
+                state = graph.state
+                if state.status is RunStatus.RUNNING:
+                    continue
+                if state.status is not RunStatus.COMPLETED:
+                    _raise_graph_status(state)
+                if graph.graph is None or graph.communities is None:
+                    _raise_graph_status(state)
+                return _snapshot_graph_out(state, graph.graph, graph.communities)
         except PersistenceError as exc:
             logger.exception("Crawl run graph retrieval failed")
             raise _error(503, "persistence_unavailable", "Crawl persistence is unavailable. Try again later.") from exc
-        if (
-            run.status is RunStatus.FAILED
-            or run.result is None
-            or run.communities is None
-        ):
-            if run.status is RunStatus.OVERLOAD_WAITING:
-                raise _error(
-                    409,
-                    "run_overload_waiting",
-                    public_run_error(run.status, run.error) or "Wikimedia is busy; retry later.",
-                )
-            if run.status is RunStatus.RECOVERABLE:
-                raise _error(
-                    409,
-                    "run_recoverable",
-                    public_run_error(run.status, run.error) or "The crawl process was interrupted; retry to resume.",
-                )
-            if run.status is RunStatus.EXPIRED:
-                raise _error(
-                    410,
-                    "run_expired",
-                    "This crawl run has expired and its detailed state was removed.",
-                )
-            raise _error(
-                409, "run_failed", public_run_error(run.status, run.error) or "The crawl run failed."
-            )
-        return _graph_out(run, complete=True)
-
-    def _graph_out(run: CrawlRunHandle, *, complete: bool) -> GraphOut | PreviewOut:
-        assert run.result is not None
-        assert run.communities is not None
-        result = run.result
-        communities = run.communities
-        return GraphOut(
-            run_id=run.id,
-            seed=run.request.seed,
-            language=run.request.language,
-            depth=run.request.depth,
-            truncated=result.truncated,
-            nodes=[
-                GraphNodeOut(
-                    title=node.title,
-                    level=node.level,
-                    is_seed=node.is_seed,
-                    community_id=communities.ids[node.title],
-                )
-                for node in result.nodes
-            ],
-            edges=[
-                GraphEdgeOut(source=edge.source, target=edge.target)
-                for edge in result.edges
-            ],
-            crawled=result.crawled,
-            discovered=result.discovered,
-            community_count=communities.count,
-            modularity=communities.modularity,
-        )
 
     app.mount("/", StaticFiles(directory=str(STATIC_DIR), html=True), name="static")
     return app
@@ -658,6 +602,79 @@ def _require_run(store: CrawlRunStore, run_id: str) -> CrawlRunHandle:
     if run is None:
         raise _error(404, "unknown_run", "No crawl run with that identifier.")
     return run
+
+
+def _state_out(state: RunStateSnapshot) -> RunStateOut:
+    progress = state.progress
+    return RunStateOut(
+        run_id=state.id,
+        seed=state.request.seed,
+        language=state.request.language,
+        depth=state.request.depth,
+        node_cap=state.request.node_cap,
+        status=state.status.value,
+        crawled=int(progress.crawled),
+        discovered=int(progress.discovered),
+        current_depth=int(progress.depth),
+        recent=[str(item) for item in progress.recent],
+        error=public_run_error(state.status, state.error),
+        retry_after=state.retry_state.retry_after if state.retry_state is not None else None,
+    )
+
+
+def _snapshot_graph_out(
+    state: RunStateSnapshot,
+    graph: RunGraphSnapshot,
+    communities: RunCommunitySnapshot,
+) -> GraphOut:
+    community_ids = dict(communities.ids)
+    return GraphOut(
+        run_id=state.id,
+        seed=state.request.seed,
+        language=state.request.language,
+        depth=state.request.depth,
+        truncated=graph.truncated,
+        nodes=[
+            GraphNodeOut(
+                title=node.title,
+                level=node.level,
+                is_seed=node.is_seed,
+                community_id=community_ids[node.title],
+            )
+            for node in graph.nodes
+        ],
+        edges=[GraphEdgeOut(source=edge.source, target=edge.target) for edge in graph.edges],
+        crawled=graph.crawled,
+        discovered=graph.discovered,
+        community_count=communities.count,
+        modularity=communities.modularity,
+    )
+
+
+def _run_poll_interval(store: CrawlRunStore) -> float:
+    return max(0.0, getattr(store, "_remote_poll_seconds", 0.05))
+
+
+def _raise_graph_status(state: RunStateSnapshot) -> None:
+    if state.status is RunStatus.OVERLOAD_WAITING:
+        raise _error(
+            409,
+            "run_overload_waiting",
+            public_run_error(state.status, state.error) or "Wikimedia is busy; retry later.",
+        )
+    if state.status is RunStatus.RECOVERABLE:
+        raise _error(
+            409,
+            "run_recoverable",
+            public_run_error(state.status, state.error) or "The crawl process was interrupted; retry to resume.",
+        )
+    if state.status is RunStatus.EXPIRED:
+        raise _error(
+            410,
+            "run_expired",
+            "This crawl run has expired and its detailed state was removed.",
+        )
+    raise _error(409, "run_failed", public_run_error(state.status, state.error) or "The crawl run failed.")
 
 
 async def _event_stream(run: CrawlRunHandle) -> AsyncIterator[str]:
