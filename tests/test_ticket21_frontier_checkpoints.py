@@ -17,11 +17,59 @@ from wikigraph.runs import SupabaseCrawlRunStore
 class PostgrestRuns:
     def __init__(self) -> None:
         self.rows: dict[str, dict[str, object]] = {}
+        self.read_views: list[str] = []
+        self.read_projections: list[dict[str, object]] = []
+        self.legacy_reads: list[str] = []
+        self.clients: list[httpx.Client] = []
+        self.async_clients: list[httpx.AsyncClient] = []
 
     def transport(self) -> httpx.MockTransport:
         return httpx.MockTransport(self.handle)
 
+    def async_transport(self) -> httpx.MockTransport:
+        return httpx.MockTransport(self.handle_async)
+
+    async def handle_async(self, request: httpx.Request) -> httpx.Response:
+        if not request.url.path.endswith("/rpc/read_crawl_run_snapshot"):
+            return httpx.Response(405)
+        args = json.loads(request.content)
+        self.read_views.append(args["p_view"])
+        row = self.rows.get(args["p_run_id"])
+        if row is None:
+            return httpx.Response(200, json=[])
+        view = args["p_view"]
+        graph = row.get("graph")
+        completed = row["status"] == "completed"
+        projected = {
+            "run_id": row["run_id"], "seed": row["seed"],
+            "language": row["language"], "depth": row["depth"],
+            "node_cap": row["node_cap"], "status": row["status"],
+            "progress": row["progress"], "error": row.get("error"),
+            "retry_state": row.get("retry_state"),
+            "expires_at": "2026-10-25T00:00:00+00:00",
+            "owner_token": row.get("owner_token"),
+            "owner_version": row.get("owner_version"),
+            "lease_until": "2026-09-25T00:00:00+00:00" if row.get("owner_token") else None,
+            "checkpoint": row.get("checkpoint") if view == "preview" and not completed else None,
+            "graph": graph if view in {"preview", "graph"} and completed else None,
+            "truncated": (
+                graph.get("truncated")
+                if completed and isinstance(graph, dict) and isinstance(graph.get("truncated"), bool)
+                else None
+            ),
+        }
+        self.read_projections.append(projected)
+        return httpx.Response(200, json=[projected])
+
+    async def close_clients(self) -> None:
+        for client in self.clients:
+            client.close()
+        for client in self.async_clients:
+            await client.aclose()
+
     def handle(self, request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            self.legacy_reads.append(request.url.params.get("run_id", ""))
         if request.url.path.endswith("/rpc/create_owned_crawl_run"):
             args = json.loads(request.content)
             row = {
@@ -61,10 +109,15 @@ class PostgrestRuns:
 
 
 def store(database: PostgrestRuns) -> SupabaseCrawlRunStore:
+    client = httpx.Client(transport=database.transport())
+    async_client = httpx.AsyncClient(transport=database.async_transport())
+    database.clients.append(client)
+    database.async_clients.append(async_client)
     return SupabaseCrawlRunStore(
         "https://supabase.test",
         "test-only-key",
-        client=httpx.Client(transport=database.transport()),
+        client=client,
+        async_client=async_client,
         governor=GlobalWikimediaGovernor(DeterministicClock()),
     )
 
@@ -114,6 +167,14 @@ async def test_interruption_before_checkpoint_retries_same_run_and_graph(
 
     assert {node["title"] for node in graph["nodes"]} == {"Hub", "Leaf"}
     assert len({(edge["source"], edge["target"]) for edge in graph["edges"]}) == 1
+    assert database.read_views == ["state", "graph"]
+    assert isinstance(database.read_projections[1]["truncated"], bool)
+    assert database.read_projections[0]["checkpoint"] is None
+    assert database.read_projections[0]["graph"] is None
+    assert database.read_projections[1]["graph"] is not None
+    assert database.read_projections[1]["checkpoint"] is None
+    assert database.legacy_reads == [f"eq.{run_id}"]  # retry still reads the owned run row
+    await database.close_clients()
 
 
 async def test_committed_checkpoint_survives_process_replacement(
@@ -161,3 +222,11 @@ async def test_committed_checkpoint_survives_process_replacement(
     titles = {node["title"] for node in graph["nodes"]}
     assert titles == {"Hub", "A", "B"}
     assert len(graph["edges"]) == 2
+    assert database.read_views == ["state", "graph"]
+    assert isinstance(database.read_projections[1]["truncated"], bool)
+    assert database.read_projections[0]["checkpoint"] is None
+    assert database.read_projections[0]["graph"] is None
+    assert database.read_projections[1]["graph"] is not None
+    assert database.read_projections[1]["checkpoint"] is None
+    assert database.legacy_reads == [f"eq.{run_id}"]  # retry still reads the owned run row
+    await database.close_clients()
