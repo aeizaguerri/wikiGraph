@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import json
+from dataclasses import replace
+
 import httpx
 import pytest
 
 from tests.support.mediawiki import FakeMediaWiki
 from wikigraph.governor import GlobalWikimediaGovernor
-from wikigraph.mediawiki import MediaWikiClient, MediaWikiError
+from wikigraph.mediawiki import ArticleLink, MediaWikiClient, MediaWikiError
 from wikigraph.response_cache import (
     InMemoryResponseCache,
     ResponseCacheKey,
@@ -35,34 +38,49 @@ def test_cache_expires_at_seven_days_and_evicts_lru() -> None:
     assert cache.get(second) is None
 
 
-def test_supabase_hit_uses_one_read_without_touching_durable_row() -> None:
-    requests: list[httpx.Request] = []
-    accessed_at = "2026-01-01T00:00:00+00:00"
+@pytest.mark.parametrize("adapter", ["memory", "postgrest"])
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("kind", "links"),
+        ("edition", "es"),
+        ("normalized_request", '["Other"]'),
+        ("continuation", "next-page"),
+        ("schema_version", "2"),
+    ],
+    ids=["operation", "edition", "titles", "continuation", "schema"],
+)
+def test_cache_identities_do_not_overwrite_other_responses(adapter: str, field: str, value: str) -> None:
+    # Treat the durable key as opaque: the server stores what the client sends,
+    # without reproducing its hash algorithm in the expected result.
+    rows = {}
+    methods = []
 
     def respond(request: httpx.Request) -> httpx.Response:
-        requests.append(request)
-        return httpx.Response(
-            200,
-            json=[
-                {
-                    "response": {"query": {"pages": []}},
-                    "expires_at": "2099-01-01T00:00:00+00:00",
-                    "last_accessed_at": accessed_at,
-                }
-            ],
-            request=request,
-        )
+        methods.append(request.method)
+        if request.method == "POST":
+            row = json.loads(request.content)
+            rows[row["cache_key"]] = row
+            return httpx.Response(201, json=[row])
+        assert request.method == "GET"
+        lookup = request.url.params["cache_key"]
+        assert lookup.startswith("eq.")
+        row = rows.get(lookup[3:])
+        return httpx.Response(200, json=[row] if row else [])
 
-    client = httpx.Client(transport=httpx.MockTransport(respond))
-    cache = SupabaseResponseCache("https://db.example", "secret", client=client)
-    key = ResponseCacheKey("redirects", "en", '["Cache hit"]', "initial")
-    try:
-        assert cache.get(key) == {"query": {"pages": []}}
-        assert len(requests) == 1
-        assert requests[0].method == "GET"
-        assert requests[0].url.params["cache_key"] == f"eq.{cache._digest(key)}"
-    finally:
-        client.close()
+    with httpx.Client(transport=httpx.MockTransport(respond)) as http:
+        cache = (InMemoryResponseCache() if adapter == "memory" else
+                 SupabaseResponseCache("https://cache.test", "secret", client=http))
+        first = ResponseCacheKey("redirects", "en", '["Hub"]', "initial")
+        other = replace(first, **{field: value})
+
+        cache.put(first, {"article": "First response"})
+        cache.put(other, {"article": "Other response"})
+        assert cache.get(first) == {"article": "First response"}
+        assert cache.get(other) == {"article": "Other response"}
+        if adapter == "postgrest":
+            # Hits must not touch the durable row or incur a prune-trigger write.
+            assert methods == ["POST", "POST", "GET", "GET"]
 
 
 @pytest.mark.asyncio
@@ -78,6 +96,51 @@ async def test_concurrent_writes_remain_within_capacity() -> None:
 
 
 @pytest.mark.asyncio
+async def test_durable_cache_hit_returns_links_without_provider_charge() -> None:
+    cache_requests: list[httpx.Request] = []
+    provider = FakeMediaWiki()
+
+    def read_cached_response(request: httpx.Request) -> httpx.Response:
+        cache_requests.append(request)
+        return httpx.Response(
+            200,
+            json=[
+                {
+                    "response": {
+                        "query": {
+                            "pages": [
+                                {
+                                    "title": "Hub",
+                                    "links": [{"title": "Leaf", "ns": 0}],
+                                }
+                            ]
+                        }
+                    },
+                    "expires_at": "2099-01-01T00:00:00+00:00",
+                }
+            ],
+            request=request,
+        )
+
+    cache_http = httpx.Client(transport=httpx.MockTransport(read_cached_response))
+    cache = SupabaseResponseCache("https://db.example", "secret", client=cache_http)
+    governor = GlobalWikimediaGovernor()
+    client = MediaWikiClient("en", provider.transport, governor=governor, cache=cache)
+    try:
+        assert await client.article_links("Hub") == [ArticleLink("Leaf", 0)]
+        assert len(cache_requests) == 1
+        assert cache_requests[0].method == "GET"
+        assert cache_requests[0].url.path == "/rest/v1/upstream_response_cache"
+        assert provider.requests == []
+        assert governor.dispatch_log == []
+    finally:
+        await client.aclose()
+        cache.close()
+        await governor.shutdown()
+        cache_http.close()
+
+
+@pytest.mark.asyncio
 async def test_hits_skip_governor_and_failures_are_not_cached() -> None:
     stub = FakeMediaWiki()
     stub.add_page("Hub", links=[(0, "Leaf")])
@@ -86,18 +149,19 @@ async def test_hits_skip_governor_and_failures_are_not_cached() -> None:
     governor = GlobalWikimediaGovernor()
     client = MediaWikiClient("en", stub.transport, governor=governor, cache=cache)
     try:
-        await client.article_links("Hub")
+        expected = [ArticleLink("Leaf", 0)]
+        assert await client.article_links("Hub") == expected
         first_dispatches = len(governor.dispatch_log)
-        await client.article_links("Hub")
+        assert await client.article_links("Hub") == expected
         assert len(governor.dispatch_log) == first_dispatches
         assert len(stub.requests) == 1
 
         stub.fail_links("Broken")
-        with pytest.raises(MediaWikiError):
+        with pytest.raises(MediaWikiError, match="HTTP 500"):
             await client.article_links("Broken")
         stub.fail_links_status.clear()
         stub.add_page("Broken")
-        await client.article_links("Broken")
+        assert await client.article_links("Broken") == []
         assert len(stub.requests) == 3
     finally:
         await client.aclose()
