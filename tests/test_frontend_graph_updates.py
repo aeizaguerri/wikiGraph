@@ -2,6 +2,7 @@
 
 from tests.conftest import BOOT_TIMEOUT, view_url
 from tests.helpers import create_run
+from tests.test_v2_ticket08_physics import NODE_POS_JS, POSITIONS_JS, page_decay
 
 
 async def test_live_preview_keeps_canvas_and_camera_through_completion(
@@ -26,10 +27,10 @@ async def test_live_preview_keeps_canvas_and_camera_through_completion(
     await browser_page.wait_for_function(
         "() => window.__wikigraph.getState() === 'static'", timeout=BOOT_TIMEOUT,
     )
-    position = await browser_page.evaluate("""() => {
-      const {x, y} = window.__wikigraph.graph.getNodeAttributes('Stable preview');
-      return {x, y};
-    }""")
+    point = await browser_page.evaluate(NODE_POS_JS, 'Stable preview')
+    await browser_page.mouse.click(point['x'], point['y'])
+    assert await browser_page.evaluate("() => window.__wikigraph.getSelected()") == 'Stable preview'
+    camera = await browser_page.evaluate("() => window.__wikigraph.sigma.getCamera().getState()")
     gate.set()
     await browser_page.wait_for_function(
         "() => document.getElementById('run-waiting').hidden && window.__wikigraph.graph.hasNode('New neighbour')",
@@ -40,10 +41,19 @@ async def test_live_preview_keeps_canvas_and_camera_through_completion(
     assert await browser_page.evaluate("() => window.__wikigraph.graph.hasDirectedEdge('Stable preview', 'New neighbour')")
     assert await browser_page.evaluate("() => window.__wikigraph.getLens()") == 'level'
     assert await browser_page.evaluate("() => window.__wikigraph.sigma.getCamera().getState().ratio") == 0.7
-    assert await browser_page.evaluate("""() => {
-      const {x, y} = window.__wikigraph.graph.getNodeAttributes('Stable preview');
-      return {x, y};
-    }""") == position
+    # A snapshot arriving after initial settling must run physics without a drag.
+    assert await browser_page.evaluate("() => window.__wikigraph.getState()") == 're-heating'
+    before = await browser_page.evaluate(POSITIONS_JS)
+    await browser_page.wait_for_timeout(200)
+    assert await browser_page.evaluate(POSITIONS_JS) != before
+    await page_decay(browser_page)
+    assert await browser_page.evaluate("() => window.__wikigraph.sigma.getCamera().getState()") == camera
+    assert await browser_page.evaluate("() => window.__wikigraph.getSelected()") == 'Stable preview'
+    # Repeated polling of unchanged topology must leave the settled layout alone.
+    settled = await browser_page.evaluate(POSITIONS_JS)
+    await browser_page.wait_for_timeout(2200)
+    assert await browser_page.evaluate("() => window.__wikigraph.getState()") == 'static'
+    assert await browser_page.evaluate(POSITIONS_JS) == settled
 
 
 async def test_static_graph_redraws_after_expand_and_collapse(stub, view_server, browser_page):

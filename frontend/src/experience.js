@@ -34,8 +34,8 @@ const LABEL_COLOR = "#dce4f4";
 const ZOOM_THRESHOLD = 6;
 
 // Physics contract (ticket 08): settle once (worker FA2), then STATIC at rest.
-// Only the first real drag movement re-heats (local supervisor burst) and the
-// burst decays back to stillness by itself; selection clicks never touch it.
+// Real topology changes and the first real drag movement trigger a bounded
+// local supervisor burst; selection clicks and metadata-only updates stay inert.
 const SETTLE_MS = 6000;
 const DECAY_MS = 1500;
 const DRAG_TRIGGER_PX = 5;
@@ -408,9 +408,12 @@ export function createExperience(graphPayload, container, options = {}) {
     const next = toGraph(nextPayload);
     language = nextPayload.language ?? "es";
     // Reconcile in place: Sigma and its camera survive, as do existing positions.
-    // FA2 already observes topology events and coalesces its worker refresh.
+    let topologyChanged = false;
     for (const node of graph.nodes()) {
-      if (!next.hasNode(node)) graph.dropNode(node);
+      if (!next.hasNode(node)) {
+        graph.dropNode(node);
+        topologyChanged = true;
+      }
     }
     for (const node of next.nodes()) {
       const attrs = next.getNodeAttributes(node);
@@ -419,20 +422,33 @@ export function createExperience(graphPayload, container, options = {}) {
         graph.mergeNodeAttributes(node, metadata);
       } else {
         graph.addNode(node, attrs);
+        topologyChanged = true;
       }
     }
     for (const edge of graph.edges()) {
       const [source, target] = graph.extremities(edge);
-      if (!next.hasDirectedEdge(source, target)) graph.dropEdge(edge);
+      if (!next.hasDirectedEdge(source, target)) {
+        graph.dropEdge(edge);
+        topologyChanged = true;
+      }
     }
     next.forEachEdge((edge, attrs, source, target) => {
-      if (!graph.hasDirectedEdge(source, target)) graph.addEdge(source, target, attrs);
+      if (!graph.hasDirectedEdge(source, target)) {
+        graph.addEdge(source, target, attrs);
+        topologyChanged = true;
+      }
     });
     if (pinnedNode && !graph.hasNode(pinnedNode)) pinnedNode = null;
     if (hoverNode && !graph.hasNode(hoverNode)) hoverNode = null;
     setSpotlight(pinnedNode ?? hoverNode);
     onSelection(pinnedNode ? articleInfo(pinnedNode) : null);
     payloadSignature = signature;
+    // The initial FA2 layout keeps settling normally. Later topology changes
+    // wake the local solver; active gestures own the decay timing until release.
+    if (topologyChanged && physicsState !== "settling") {
+      if (physicsState === "static") reheat();
+      if (!dragging && !touchDrag) startDecay();
+    }
   }
 
   return {
