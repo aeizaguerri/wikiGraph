@@ -32,31 +32,31 @@ async def test_state_snapshot_is_detached_and_excludes_reconstructive_and_lifecy
 
 
 @pytest.mark.asyncio
-async def test_preview_snapshot_copies_checkpoint_and_hides_it_for_expired_run(
+async def test_preview_snapshot_stays_detached_as_public_checkpoint_advances(
     stub: FakeMediaWiki,
 ) -> None:
+    stub.add_page("Hub", links=[(0, "Leaf")])
+    stub.add_page("Leaf")
     store = InMemoryCrawlRunStore()
     run = store.start_run(CrawlRequest("Hub", 1, "en"), stub.transport)
 
-    preview = await store.get_preview(run.id)
+    initial = await store.get_preview(run.id)
+    assert initial is not None and initial.checkpoint is not None
+    assert initial.checkpoint.frontier == ("Hub",)
+    assert initial.checkpoint.nodes[0].title == "Hub"
 
-    assert preview is not None
-    assert preview.state.status is RunStatus.RUNNING
-    assert preview.checkpoint is not None
-    assert preview.checkpoint.frontier == ("Hub",)
-    assert preview.checkpoint.nodes[0].title == "Hub"
-    assert isinstance(preview.checkpoint.frontier, tuple)
-    assert not hasattr(preview, "task")
-    run._checkpoint.frontier.append("worker mutation")
-    assert preview.checkpoint.frontier == ("Hub",)
-
-    run.status = RunStatus.EXPIRED
-    expired_preview = await store.get_preview(run.id)
-    assert expired_preview is not None
-    assert expired_preview.state.status is RunStatus.EXPIRED
-    assert expired_preview.checkpoint is None
-
-    await store.shutdown()
+    try:
+        await run.wait_done()
+        advanced = await store.get_preview(run.id)
+        assert advanced is not None and advanced.graph is not None
+        assert {node.title for node in advanced.graph.nodes} == {"Hub", "Leaf"}
+        # A previous caller's checkpoint remains an independent snapshot after
+        # the lifecycle has crossed from running to completed.
+        assert initial.state.status is RunStatus.RUNNING
+        assert initial.checkpoint.frontier == ("Hub",)
+        assert tuple(node.title for node in initial.checkpoint.nodes) == ("Hub",)
+    finally:
+        await store.shutdown()
 
 
 @pytest.mark.asyncio
