@@ -13,8 +13,9 @@ from tests.support.mediawiki import FakeMediaWiki
 
 
 async def test_variant_c_landing_is_search_first_with_supported_defaults(
-    browser_page: Any, view_server: httpx.AsyncClient
+    browser_page: Any, view_server: httpx.AsyncClient, stub: FakeMediaWiki
 ) -> None:
+    stub.add_page("Apache Spark")
     await browser_page.goto(str(view_server.base_url))
     await browser_page.wait_for_function("() => !document.getElementById('landing-view').hidden")
 
@@ -27,6 +28,14 @@ async def test_variant_c_landing_is_search_first_with_supported_defaults(
     assert await browser_page.locator(".phase-controls").count() == 0
     assert await browser_page.locator("[data-phase]").count() == 0
     assert await browser_page.locator("#launch-chip").count() == 0
+    assert await browser_page.input_value("#launch-seed") == "Apache Spark"
+    async with browser_page.expect_request(
+        lambda request: request.method == "POST" and request.url.endswith("/api/runs")
+    ) as launched:
+        await browser_page.click("#launch-submit")
+    assert (await launched.value).post_data_json == {
+        "seed": "Apache Spark", "language": "es", "depth": 2, "nodeCap": 500,
+    }
 
 
 async def test_variant_c_keeps_the_real_node_cap_launch_default(

@@ -20,56 +20,13 @@ from typing import Any
 import httpx
 
 from tests.support.browser import boot_view, completed_run
+from tests.support.graph import NODE_POS_JS, POSITIONS_JS, page_decay, populate, wait_static
 from tests.support.mediawiki import FakeMediaWiki
 
-# Must outlast the frontend's SETTLE_MS (6000 ms) plus boot time.
-STATIC_WAIT = 14_000
-DECAY_WAIT = 4_000
 FROST_PAUSE = 0.4
 
 STATE_JS = "() => window.__wikigraph.getState()"
 STATUS_JS = "() => document.getElementById('status').textContent"
-
-POSITIONS_JS = """
-() => {
-  const graph = window.__wikigraph.graph;
-  return graph.nodes().map((node) => {
-    const { x, y } = graph.getNodeAttributes(node);
-    return `${node}:${x.toFixed(9)},${y.toFixed(9)}`;
-  }).sort();
-}
-"""
-
-NODE_POS_JS = """
-(node) => {
-  const experience = window.__wikigraph;
-  const attrs = experience.graph.getNodeAttributes(node);
-  const point = experience.sigma.graphToViewport({ x: attrs.x, y: attrs.y });
-  const rect = document.getElementById("graph").getBoundingClientRect();
-  return { x: rect.left + point.x, y: rect.top + point.y };
-}
-"""
-
-
-def populate(stub: FakeMediaWiki) -> None:
-    stub.add_page(
-        "Ana",
-        [(0, "Biología"), (0, "Química"), (0, "Astronomía"), (0, "Historia")],
-    )
-    stub.add_page(
-        "Biología",
-        [(0, "Química"), (0, "Astronomía"), (0, "Ana"), (0, "Selva")],
-    )
-    stub.add_page("Química", [(0, "Biología")])
-    stub.add_page("Astronomía", [(0, "Física")])
-    stub.add_page("Historia")
-    stub.add_page("Selva")
-    stub.add_page("Física")
-
-
-async def wait_static(page: Any, timeout: int = STATIC_WAIT) -> None:
-    await page.wait_for_function("() => window.__wikigraph.getState() === 'static'",
-                                 timeout=timeout)
 
 
 async def test_settle_ends_static_and_stays_untouched(
@@ -140,12 +97,6 @@ async def test_drag_re_heats_and_decays_back_to_static(
 
     await asyncio.sleep(FROST_PAUSE)
     assert await browser_page.evaluate(POSITIONS_JS) == after
-
-
-async def page_decay(page: Any) -> None:
-    await page.wait_for_function(
-        "() => window.__wikigraph.getState() === 'static'", timeout=DECAY_WAIT
-    )
 
 
 async def test_selection_click_leaves_the_layout_undisturbed(

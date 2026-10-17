@@ -249,3 +249,11 @@ tests/test_v2_ticket13_default_view.py::test_capped_graph_chrome_does_not_collid
 cloudflare/worker.test.js::proxyApi preserves method, query, body, auth headers, status, and stream	cloudflare/worker.test.js::API requests preserve method, query, body, status and safe headers	unit-worker
 cloudflare/worker.test.js::proxyApi preserves method, query, body, auth headers, status, and stream	cloudflare/worker.test.js::API events arrive before the origin stream closes	unit-worker
 cloudflare/worker.test.js::non-API requests use Cloudflare assets, including SPA routes	cloudflare/worker.test.js::non-API requests use Cloudflare assets, including SPA routes	unit-worker
+tests/test_frontend_graph_updates.py::test_live_preview_keeps_canvas_and_camera_through_completion	tests/e2e/test_frontend_graph_updates.py::test_live_preview_keeps_canvas_and_camera_through_completion	e2e
+tests/test_frontend_graph_updates.py::test_static_graph_redraws_after_expand_and_collapse	tests/e2e/test_frontend_graph_updates.py::test_static_graph_redraws_after_expand_and_collapse	e2e
+tests/test_frontend_graph_updates.py::test_default_launch_submits_spanish_apache_spark	tests/e2e/test_launcher.py::test_variant_c_landing_is_search_first_with_supported_defaults	e2e
+tests/test_frontend_touch_drag.py::test_touch_moves_node_not_camera_and_releases	tests/e2e/test_frontend_touch_drag.py::test_touch_moves_node_not_camera_and_releases	e2e
+tests/test_frontend_touch_drag.py::test_touch_tap_and_jitter_keep_selection_and_static_layout	tests/e2e/test_frontend_touch_drag.py::test_touch_tap_and_jitter_keep_selection_and_static_layout	e2e
+tests/test_frontend_touch_drag.py::test_first_tap_after_pinch_selects_node	tests/e2e/test_frontend_touch_drag.py::test_first_tap_after_pinch_selects_node	e2e
+tests/test_frontend_touch_drag.py::test_touch_background_pan_keeps_nodes_static	tests/e2e/test_frontend_touch_drag.py::test_touch_background_pan_keeps_nodes_static	e2e
+tests/test_frontend_touch_drag.py::test_touch_pinch_releases_node_and_preserves_zoom	tests/e2e/test_frontend_touch_drag.py::test_touch_pinch_releases_node_and_preserves_zoom	e2e

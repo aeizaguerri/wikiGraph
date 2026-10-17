@@ -45,7 +45,7 @@ async def test_capped_graph_chrome_does_not_collide_and_legend_is_expanded_only(
             timeout=BOOT_TIMEOUT,
         )
         await browser_page.wait_for_function(
-            "() => /settling|re-heating/.test(document.getElementById('status').textContent)",
+            "() => ['settling', 're-heating', 'static'].includes(window.__wikigraph?.getState())",
             timeout=BOOT_TIMEOUT,
         )
 
