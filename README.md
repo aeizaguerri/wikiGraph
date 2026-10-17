@@ -79,6 +79,33 @@ The two tests specific to retired benchmarks have been removed. Product regressi
 
 Python tests use pytest/pytest-asyncio (configured in [`pyproject.toml`](pyproject.toml)); the package has no configured frontend Node test script, but the Cloudflare Worker has a direct Node test file. Some Supabase/PostgREST integration tests need the repository's local database harness and environment; see the test setup in [`tests/conftest.py`](tests/conftest.py) and [`tests/test_ticket28_postgrest_roles.py`](tests/test_ticket28_postgrest_roles.py). Do not infer that an unrun command passed, or that an isolated unit/integration test proves a hosted deployment property.
 
+### Continuous integration
+
+GitHub Actions runs [`ci.yml`](.github/workflows/ci.yml) for pull requests and pushes to `main`. It installs Python dependencies from `uv.lock` with `uv sync --frozen --all-groups`, builds the frontend before running pytest, provisions Chromium for browser tests, then runs `uv run mypy src` and the Cloudflare Worker Node tests. The workflow uses Python 3.12, uv 0.9.25, and Node.js 22.12.0 or newer within the Node 22 release line.
+
+CI is intentionally secret-free: it does not receive hosted or production database credentials, so database integrations requiring configured PostgREST credentials are not enabled there. The CI artifact is the built `src/wikigraph/static/` directory—not a promise that rebuilt hash-named files match generated files committed in the source tree. It is uploaded only after every check passes, named `frontend-<checked SHA>`, and retained for 30 days. For a pull request, the checked SHA is GitHub's synthetic merge commit SHA; on a push to `main`, it is the pushed commit SHA. A later manual deployment must use the artifact from the successful `main` push for the exact source commit being deployed, rather than rebuilding a different revision.
+
+### Approved production releases
+
+Production deployment is manual and serial: GitHub Actions deploys only from `main`, after an operator selects the run ID of a successful CI push to `main`. A read-only preflight verifies the run repository/workflow/event/branch/result, confirms its exact 40-character commit is still an ancestor of current `main`, checks the unexpired `frontend-<SHA>` artifact from that run, and verifies the production environment has configured reviewers and allows only `main`, both before approval and again after approval. The post-approval check runs the helper from the workflow's pinned `github.sha` source and must resolve the same release SHA before provider deployment steps; the selected release source is checked out afterward. A preflight API or permission error stops release; the workflow does not fall back to an unprotected deployment.
+
+Set up these controls before using **Actions → Approved production deployment → Run workflow**:
+
+| Setting | Required configuration |
+|---|---|
+| GitHub `production` environment | Add required reviewers and restrict deployment branches to a custom policy containing only `main`. Verify both settings in repository Settings → Environments. |
+| `RELEASE_PREFLIGHT_TOKEN` (repository Actions secret) | Dedicated fine-grained, read-only token limited to this repository, with Administration: read and Actions: read. The workflow uses it only for GitHub release/protection reads; it is never used for deployment. If omitted, `GITHUB_TOKEN` is tried and an inaccessible protection API fails closed. |
+| `RENDER_API_KEY` (production environment secret) | Render API key used only after the environment approval. |
+| `RENDER_SERVICE_ID` (production environment variable) | ID of the existing `wikigraph-api` service. Preflight checks that it still targets this repository's `main` branch and automatic deploys are disabled. |
+| `CLOUDFLARE_API_TOKEN` (production environment secret) | Token scoped to the intended account and Worker script deployment/assets upload; do not use an account-global token. |
+| `CLOUDFLARE_ACCOUNT_ID` (production environment variable) | ID of the intended Cloudflare account. Confirm account and plan independently; the workflow does not change plan, domain, or billing settings. |
+
+Use the numeric run ID shown in the successful **CI** run's URL. Only a completed `push` run for `main` under `.github/workflows/ci.yml` is accepted; PR artifacts, arbitrary refs, a different repository, expired artifacts, and commits no longer ancestral to current `main` are rejected. CI artifacts expire after 30 days, so select a recent run. The workflow downloads that artifact and checks out its validated source SHA; it does not rebuild the frontend. Wrangler is invoked at the exact release `4.148.0`.
+
+Render automatic deploys are disabled in [`render.yaml`](render.yaml). One exact-commit Render deploy is requested with cache retained; an ambiguous POST response is not retried, and an operator must reconcile Render before any retry. The workflow waits for that deploy to be `live`, verifies the reported commit, then checks only `https://wikigraph.onrender.com/readyz` (no crawl). It deploys the tested static artifact and source Worker to Cloudflare only after readiness succeeds. Supabase migrations are never run by CI/CD and remain separately operator-approved.
+
+This is not an atomic cross-provider release. If Cloudflare deployment fails after Render becomes live, the backend remains updated; there is no automatic rollback or schema action. Reconcile provider state and choose any recovery explicitly. Production environment protection must remain configured; simply naming an environment does not require approval.
+
 ## Deployment and operations
 
 ### Runtime and database
