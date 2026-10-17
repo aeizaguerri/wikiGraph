@@ -295,6 +295,87 @@ export function createExperience(graphPayload, container, options = {}) {
   mouseCaptor.on("mouseup", release);
   window.addEventListener("mouseup", release);
 
+  // Reserve one-finger node gestures before Sigma pans the camera. Touch
+  // coordinates already use viewport pixels, just like the mouse captor.
+  // Background and two-finger gestures retain Sigma's native navigation.
+  const touchCaptor = sigma.getTouchCaptor();
+  let touchDrag = null;
+  let suppressTouchTap = false;
+  let multiTouch = false;
+
+  function releaseTouch() {
+    if (!touchDrag) return;
+    graph.setNodeAttribute(touchDrag.node, "fixed", false);
+    if (touchDrag.moved) sigma.setCustomBBox(touchDrag.previousBBox);
+    touchDrag = null;
+    if (physicsState === "re-heating") startDecay();
+  }
+
+  touchCaptor.on("touchdown", (e) => {
+    releaseTouch();
+    if (e.touches.length !== 1) {
+      multiTouch = true;
+      suppressTouchTap = true;
+      return;
+    }
+    // The remaining finger after a pinch is not a new node drag.
+    if (multiTouch) return;
+    suppressTouchTap = false;
+    const point = e.touches[0];
+    const node = sigma.getNodeAtPosition(point);
+    if (!node) return;
+    touchDrag = { node, startX: point.x, startY: point.y, moved: false };
+    graph.setNodeAttribute(node, "fixed", true);
+  });
+  touchCaptor.on("touchmove", (e) => {
+    if (!touchDrag) return;
+    if (e.touches.length !== 1) {
+      releaseTouch();
+      return;
+    }
+    e.preventSigmaDefault();
+    const point = e.touches[0];
+    if (!touchDrag.moved &&
+        Math.hypot(point.x - touchDrag.startX, point.y - touchDrag.startY) < DRAG_TRIGGER_PX) return;
+    if (!touchDrag.moved) {
+      // Re-heating changes graph extents. Keep the viewport-to-graph mapping
+      // stable under the finger until release, then restore normal fitting.
+      touchDrag.previousBBox = sigma.getCustomBBox();
+      sigma.setCustomBBox(touchDrag.previousBBox ?? sigma.getBBox());
+      touchDrag.moved = true;
+    }
+    suppressTouchTap = true;
+    const pos = sigma.viewportToGraph(point);
+    graph.mergeNodeAttributes(touchDrag.node, { x: pos.x, y: pos.y });
+    if (physicsState !== "re-heating") reheat();
+  });
+  touchCaptor.on("touchup", (e) => {
+    if (e.original.type === "touchcancel") suppressTouchTap = true;
+    releaseTouch();
+    // Sigma may retain a released point after a pinch; the DOM event owns
+    // the actual active-finger count at the end of the gesture.
+    if (!e.original.touches.length) multiTouch = false;
+  });
+  const resetTouchGesture = (e) => {
+    if (e.touches.length) return;
+    multiTouch = false;
+    suppressTouchTap = false;
+  };
+  // Sigma clears its touch positions while handling the 2→1 transition, so
+  // it may ignore the final DOM touchend and never emit a final touchup.
+  document.addEventListener("touchend", resetTouchGesture);
+  document.addEventListener("touchcancel", resetTouchGesture);
+  const ignoreTouchTap = (e) =>
+    e.event.original.type.startsWith("touch") && suppressTouchTap;
+  // Sigma's tap tolerance is larger than our drag threshold. Short drags,
+  // cancellation and pinches must not also select an article or double-zoom.
+  sigma.on("doubleClickNode", (e) => {
+    if (ignoreTouchTap(e)) e.preventSigmaDefault();
+  });
+  sigma.on("doubleClickStage", (e) => {
+    if (ignoreTouchTap(e)) e.preventSigmaDefault();
+  });
+
   // ---- spotlight: hover previews, click pins, backdrop click unpins ----
   // A pinned selection outranks the transient hover; a click without movement
   // is a deselect (drags never emit click events).
@@ -307,13 +388,13 @@ export function createExperience(graphPayload, container, options = {}) {
     if (!pinnedNode) setSpotlight(null);
   });
   sigma.on("clickNode", (e) => {
-    if (pinnedNode) return;
+    if (ignoreTouchTap(e) || pinnedNode) return;
     pinnedNode = e.node;
     setSpotlight(e.node);
     onSelection(articleInfo(e.node));
   });
-  sigma.on("clickStage", () => {
-    if (!pinnedNode) return;
+  sigma.on("clickStage", (e) => {
+    if (ignoreTouchTap(e) || !pinnedNode) return;
     pinnedNode = null;
     setSpotlight(hoverNode);
     onSelection(null);
@@ -378,6 +459,7 @@ export function createExperience(graphPayload, container, options = {}) {
       };
     },
     destroy() {
+      releaseTouch();
       clearTimeout(settleTimer);
       clearTimeout(decayTimer);
       try {
@@ -388,6 +470,8 @@ export function createExperience(graphPayload, container, options = {}) {
       }
       if (supervisor) supervisor.kill();
       window.removeEventListener("mouseup", release);
+      document.removeEventListener("touchend", resetTouchGesture);
+      document.removeEventListener("touchcancel", resetTouchGesture);
       resizeObserver.disconnect();
       sigma.kill();
     },
