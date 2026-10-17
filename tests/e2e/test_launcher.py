@@ -24,6 +24,8 @@ async def test_variant_c_landing_is_search_first_with_supported_defaults(
     assert await browser_page.get_attribute("#launch-edition [data-language='es']", "aria-pressed") == "true"
     assert await browser_page.is_visible("#launch-submit")
     assert await browser_page.locator(".variant-switcher").count() == 0
+    assert await browser_page.locator(".phase-controls").count() == 0
+    assert await browser_page.locator("[data-phase]").count() == 0
     assert await browser_page.locator("#launch-chip").count() == 0
 
 

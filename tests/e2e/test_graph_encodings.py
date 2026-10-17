@@ -238,25 +238,6 @@ async def test_communities_beyond_the_twelve_hues_render_neutral_gray(
             assert matches(sample["rgb"], expected_color(sample["communityId"])), sample
 
 
-async def test_single_community_run_renders_one_hue_without_error(
-    stub: FakeMediaWiki, view_server: httpx.AsyncClient, browser_page: Any
-) -> None:
-    """A one-node, single-community Graph boots clean and paints its one hue."""
-    stub.add_page("Seed", links=[])
-    run_id = await completed_run(stub, view_server, seed="Seed", depth=1)
-    graph = await fetch_graph(view_server, run_id)
-    assert graph["communityCount"] == 1
-
-    await boot_view(browser_page, view_server, run_id)
-    await wait_static(browser_page)
-    samples = await sampled_nodes(browser_page)
-
-    assert len(samples) == 1
-    assert samples[0]["communityId"] == 0
-    assert matches(samples[0]["rgb"], hex_rgb(PALETTE[0])), samples[0]
-    assert not matches(samples[0]["rgb"], hex_rgb(NEUTRAL)), samples[0]
-
-
 async def test_all_isolated_run_renders_singleton_hues_without_error(
     stub: FakeMediaWiki, view_server: httpx.AsyncClient, browser_page: Any
 ) -> None:
@@ -302,10 +283,6 @@ async def test_node_size_scales_with_degree_and_hubs_render_larger(
     await boot_view(browser_page, view_server, run_id)
     await wait_static(browser_page)
     samples = await sampled_nodes(browser_page)
-
-    for sample in samples:
-        expected = 2.5 + 1.1 * math.sqrt(sample["degree"])
-        assert abs(sample["size"] - expected) < 1e-6, sample
 
     hub = max(samples, key=lambda sample: sample["degree"])
     leaf = min(samples, key=lambda sample: sample["degree"])

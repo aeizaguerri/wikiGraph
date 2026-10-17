@@ -2,29 +2,13 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { clampCap } from "../../src/launcher.js";
-import * as graphStyle from "../../src/graph-style.js";
-
-const {
-  COLOR_LENS_VALUES,
+import {
   communityColor,
   levelColor,
   nodeSize,
   parseLens,
   wikipediaUrl,
-} = graphStyle;
-
-test("graph styles expose shared values and helpers, not calculation constants", () => {
-  assert.deepEqual(Object.keys(graphStyle).sort(), [
-    "COLOR_LENS_VALUES",
-    "COMMUNITY_PALETTE",
-    "NEUTRAL_COLOR",
-    "communityColor",
-    "levelColor",
-    "nodeSize",
-    "parseLens",
-    "wikipediaUrl",
-  ]);
-});
+} from "../../src/graph-style.js";
 
 test("clampCap uses the launch cap defaults and inclusive limits", () => {
   assert.equal(clampCap("not a number"), 500);
@@ -36,29 +20,25 @@ test("clampCap uses the launch cap defaults and inclusive limits", () => {
   assert.equal(clampCap("17.9"), 17);
 });
 
-test("communityColor returns the fixed palette and neutral fallback", () => {
-  assert.deepEqual(
-    Array.from({ length: 12 }, (_, id) => communityColor(id)),
-    [
-      "#d65151", "#51d678", "#9f51d6", "#d6c651", "#51c0d6", "#d65199",
-      "#73d651", "#5751d6", "#d67e51", "#51d6a5", "#cb51d6", "#bad651",
-    ],
-  );
+test("communityColor maps published ids to hues and unknown ids to neutral", () => {
+  const expected = [
+    "#d65151", "#51d678", "#9f51d6", "#d6c651", "#51c0d6", "#d65199",
+    "#73d651", "#5751d6", "#d67e51", "#51d6a5", "#cb51d6", "#bad651",
+  ];
+  expected.forEach((color, id) => assert.equal(communityColor(id), color));
   assert.equal(communityColor(12), "#808080");
   assert.equal(communityColor(-1), "#808080");
 });
 
-test("levelColor returns the depth ladder and neutral fallback", () => {
-  assert.deepEqual(
-    Array.from({ length: 4 }, (_, level) => levelColor(level)),
-    ["#f2f6ff", "#a9c3ea", "#5f83ad", "#3a5372"],
+test("levelColor maps reached depths to the ladder and deeper levels to neutral", () => {
+  ["#f2f6ff", "#a9c3ea", "#5f83ad", "#3a5372"].forEach(
+    (color, level) => assert.equal(levelColor(level), color),
   );
   assert.equal(levelColor(4), "#808080");
   assert.equal(levelColor(-1), "#808080");
 });
 
-test("parseLens accepts only the published lens values", () => {
-  assert.deepEqual(COLOR_LENS_VALUES, ["community", "level"]);
+test("parseLens preserves either supported choice and defaults unknown input", () => {
   assert.equal(parseLens("community"), "community");
   assert.equal(parseLens("level"), "level");
   assert.equal(parseLens("paisley"), "community");

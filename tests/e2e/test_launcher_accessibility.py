@@ -25,12 +25,3 @@ async def test_variant_c_controls_are_keyboard_reachable(
     await browser_page.keyboard.press("Enter")
     await browser_page.wait_for_function("() => new URL(location.href).searchParams.has('run')")
     await browser_page.wait_for_function("() => window.__wikigraph && window.__wikigraph.graph.hasNode('Keyboard')")
-
-
-async def test_variant_c_has_no_development_phase_or_variant_switcher(
-    browser_page: Any, view_server: httpx.AsyncClient
-) -> None:
-    await browser_page.goto(str(view_server.base_url))
-    assert await browser_page.locator(".phase-controls").count() == 0
-    assert await browser_page.locator(".variant-switcher").count() == 0
-    assert await browser_page.locator("[data-phase]").count() == 0

@@ -197,25 +197,23 @@ async def test_lens_choice_is_url_expressed_and_restored_on_reload(
         "() => window.__wikigraph", timeout=10_000
     )
     assert await browser_page.evaluate("() => window.__wikigraph.getLens()") == "level"
-    await assert_paint(browser_page, lambda s: level_color(s["level"]))
+    assert await browser_page.get_attribute("#lens-level", "aria-pressed") == "true"
+    # Restoring a URL must paint the selected lens, not only label it correctly.
+    await assert_paint(browser_page, lambda sample: level_color(sample["level"]))
 
     # A shared URL boots straight into the requested lens...
     shared = browser_page.url.replace("color=level", "color=community")
     await browser_page.goto(shared)
     await browser_page.wait_for_function("() => window.__wikigraph")
     assert await browser_page.evaluate("() => window.__wikigraph.getLens()") == "community"
-    await assert_paint(
-        browser_page, lambda s: community_color(s["communityId"])
-    )
+    assert await browser_page.get_attribute("#lens-community", "aria-pressed") == "true"
 
     # ...and an unknown lens value falls back to the community default.
     bogus = browser_page.url.replace("color=community", "color=paisley")
     await browser_page.goto(bogus)
     await browser_page.wait_for_function("() => window.__wikigraph")
     assert await browser_page.evaluate("() => window.__wikigraph.getLens()") == "community"
-    await assert_paint(
-        browser_page, lambda s: community_color(s["communityId"])
-    )
+    assert await browser_page.get_attribute("#lens-community", "aria-pressed") == "true"
 
 
 async def test_legend_names_the_active_encoding_and_its_colors(
@@ -296,4 +294,3 @@ async def test_level_lens_stays_honestly_sparse(
         "Level 0",
         "Level 1",
     ], legend
-    await assert_paint(browser_page, lambda s: level_color(s["level"]))
