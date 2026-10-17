@@ -30,6 +30,7 @@ def run(**overrides: Any) -> dict[str, Any]:
         "head_sha": SHA,
         "status": "completed",
         "conclusion": "success",
+        "created_at": "2026-02-01T12:00:00Z",
     }
     result.update(overrides)
     return result
@@ -47,7 +48,7 @@ def test_release_identity_is_rechecked_after_environment_from_workflow_source() 
                 return index, block
         raise AssertionError(f"Missing workflow step: {name}")
 
-    original_index, original = step_named("Validate CI run and artifact")
+    original_index, original = step_named("Resolve and validate CI run and artifact")
     source_index, source_checkout = step_named("Check out workflow source")
     approved_source_index, approved_source_checkout = step_named("Check out workflow source for post-environment recheck")
     recheck_index, recheck = step_named("Recheck release identity after environment")
@@ -61,18 +62,174 @@ def test_release_identity_is_rechecked_after_environment_from_workflow_source() 
     assert "ref: ${{ github.sha }}" in approved_source_checkout
     assert "RELEASE_PREFLIGHT_TOKEN" not in workflow
     assert "deployments: read" not in workflow
+    assert "python scripts/ci_cd.py select-run" in original
     assert "python scripts/ci_cd.py preflight" in original
     assert "python scripts/ci_cd.py preflight" in recheck
     for env_name, value in (
         ("GITHUB_TOKEN", "${{ github.token }}"),
         ("GITHUB_REPOSITORY", "${{ github.repository }}"),
         ("GITHUB_REF", "${{ github.ref }}"),
-        ("CI_RUN_ID", "${{ inputs.ci_run_id }}"),
     ):
         assert f"{env_name}: {value}" in original
         assert f"{env_name}: {value}" in recheck
+    assert "CI_RUN_ID: ${{ inputs.ci_run_id }}" in original
+    assert 'CI_RUN_ID="$run_id" python scripts/ci_cd.py preflight' in original
+    assert "CI_RUN_ID: ${{ needs.preflight.outputs.run_id }}" in recheck
+    assert "run-id: ${{ needs.preflight.outputs.run_id }}" in step_named("Download the exact tested frontend artifact")[1]
+    assert "run_id: ${{ steps.verify.outputs.run_id }}" in workflow
     assert 'if [[ "$sha" != "${{ needs.preflight.outputs.sha }}" ]]' in recheck
     assert "ref: ${{ needs.preflight.outputs.sha }}" in deploy_checkout
+
+
+def test_select_run_orders_all_bounded_pages_by_created_at(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    import scripts.ci_cd as ci_cd
+
+    monkeypatch.setenv("GITHUB_REPOSITORY", REPOSITORY)
+    monkeypatch.setenv("GITHUB_REF", "refs/heads/main")
+    monkeypatch.setenv("CI_RUN_ID", "")
+    monkeypatch.setenv("GITHUB_TOKEN", "read-only-test-token")
+    older = run()
+    older.update(id=111, created_at="2026-01-01T00:00:00Z")
+    first_page = [older] + [run(event="pull_request", id=number) for number in range(1000, 1099)]
+    newest = run(head_sha="b" * 40)
+    newest.update(id=222, created_at="2026-03-01T00:00:00Z")
+    responses = {
+        "1": {"workflow_runs": first_page},
+        "2": {"workflow_runs": [newest]},
+        f"/repos/{REPOSITORY}/compare/{SHA}...main": {"status": "ahead"},
+        f"/repos/{REPOSITORY}/actions/runs/{older['id']}/artifacts": {"artifacts": [{"id": 11, "name": f"frontend-{SHA}", "expired": False}]},
+        f"/repos/{REPOSITORY}/compare/{'b' * 40}...main": {"status": "ahead"},
+        f"/repos/{REPOSITORY}/actions/runs/{newest['id']}/artifacts": {"artifacts": [{"id": 22, "name": f"frontend-{'b' * 40}", "expired": False}]},
+    }
+    listing_pages: list[str] = []
+    listing_queries: list[dict[str, list[str]]] = []
+    calls: list[tuple[str, str]] = []
+
+    def request(url: str, *, token: str | None = None, method: str = "GET", body: Any = None) -> tuple[int, Any]:
+        from urllib.parse import parse_qs, urlparse
+        parsed = urlparse(url)
+        calls.append((parsed.path, method))
+        assert token == "read-only-test-token" and method == "GET"
+        if parsed.path.endswith("/workflows/ci.yml/runs"):
+            query = parse_qs(parsed.query)
+            listing_queries.append(query)
+            assert query["branch"] == ["main"] and query["event"] == ["push"]
+            assert query["status"] == ["completed"] and query["per_page"] == ["100"]
+            page = query["page"][0]
+            listing_pages.append(page)
+            return 200, responses[page]
+        return 200, responses[parsed.path]
+
+    monkeypatch.setattr(ci_cd, "_request", request)
+    monkeypatch.setattr("sys.argv", ["ci_cd.py", "select-run"])
+    assert ci_cd.main() == 0
+    assert capsys.readouterr().out == f"222 {'b' * 40}\n"
+    assert listing_pages == ["1", "2"]
+    assert all(set(query) == {"branch", "event", "status", "per_page", "page"} for query in listing_queries)
+    assert (f"/repos/{REPOSITORY}/actions/runs/{older['id']}/artifacts", "GET") not in calls
+
+
+def test_select_run_fails_closed_on_malformed_ordering_metadata(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    import scripts.ci_cd as ci_cd
+
+    monkeypatch.setenv("GITHUB_REPOSITORY", REPOSITORY)
+    monkeypatch.setenv("GITHUB_REF", "refs/heads/main")
+    monkeypatch.setenv("CI_RUN_ID", "")
+    monkeypatch.setenv("GITHUB_TOKEN", "read-only-test-token")
+    candidate = run(created_at="2026-02-01 12:00:00Z", id=456)
+    calls: list[str] = []
+
+    def request(url: str, **kwargs: Any) -> tuple[int, Any]:
+        from urllib.parse import urlparse
+        calls.append(urlparse(url).path)
+        return 200, {"workflow_runs": [candidate]}
+
+    monkeypatch.setattr(ci_cd, "_request", request)
+    monkeypatch.setattr("sys.argv", ["ci_cd.py", "select-run"])
+    assert ci_cd.main() == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "Release stopped safely: GitHub workflow run has malformed created_at ordering metadata\n"
+    assert calls == [f"/repos/{REPOSITORY}/actions/workflows/ci.yml/runs"]
+
+
+def test_select_run_rejects_when_no_unexpired_exact_sha_artifact_exists(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    import scripts.ci_cd as ci_cd
+
+    monkeypatch.setenv("GITHUB_REPOSITORY", REPOSITORY)
+    monkeypatch.setenv("GITHUB_REF", "refs/heads/main")
+    monkeypatch.setenv("CI_RUN_ID", "")
+    monkeypatch.setenv("GITHUB_TOKEN", "read-only-test-token")
+    candidate = run()
+    candidate["id"] = 123
+    monkeypatch.setattr(ci_cd, "_request", lambda url, **kwargs: (200, {"workflow_runs": [candidate]} if "/workflows/" in url else {"status": "ahead"} if "/compare/" in url else {"artifacts": []}))
+    monkeypatch.setattr("sys.argv", ["ci_cd.py", "select-run"])
+    assert ci_cd.main() == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "Release stopped safely: No successful main CI run has a valid unexpired exact-SHA frontend artifact\n"
+
+
+def test_select_run_does_not_hide_github_api_errors(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    import scripts.ci_cd as ci_cd
+
+    monkeypatch.setenv("GITHUB_REPOSITORY", REPOSITORY)
+    monkeypatch.setenv("GITHUB_REF", "refs/heads/main")
+    monkeypatch.setenv("CI_RUN_ID", "")
+    monkeypatch.setenv("GITHUB_TOKEN", "read-only-test-token")
+    calls: list[tuple[str, str]] = []
+
+    def request(url: str, *, token: str | None = None, method: str = "GET", body: Any = None) -> tuple[int, Any]:
+        from urllib.parse import urlparse
+        calls.append((urlparse(url).path, method))
+        return 403, {"message": "denied"}
+
+    monkeypatch.setattr(ci_cd, "_request", request)
+    monkeypatch.setattr("sys.argv", ["ci_cd.py", "select-run"])
+    assert ci_cd.main() == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "Release stopped safely: GitHub GET /repos/aeizaguerri/wikiGraph/actions/workflows/ci.yml/runs?branch=main&event=push&status=completed&per_page=100&page=1 failed with HTTP 403\n"
+    assert calls == [(f"/repos/{REPOSITORY}/actions/workflows/ci.yml/runs", "GET")]
+
+
+def test_select_run_rejects_untrusted_explicit_id_without_api_calls(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    import scripts.ci_cd as ci_cd
+
+    monkeypatch.setenv("GITHUB_REPOSITORY", REPOSITORY)
+    monkeypatch.setenv("GITHUB_REF", "refs/heads/main")
+    monkeypatch.setenv("CI_RUN_ID", "123;echo unsafe")
+    monkeypatch.setenv("GITHUB_TOKEN", "read-only-test-token")
+    calls: list[str] = []
+    monkeypatch.setattr(ci_cd, "_request", lambda url, **kwargs: calls.append(url))
+    monkeypatch.setattr("sys.argv", ["ci_cd.py", "select-run"])
+    assert ci_cd.main() == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "Release stopped safely: CI run ID must contain digits only\n"
+    assert calls == []
+
+
+def test_select_run_preserves_explicit_run_id(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    import scripts.ci_cd as ci_cd
+
+    monkeypatch.setenv("GITHUB_REPOSITORY", REPOSITORY)
+    monkeypatch.setenv("GITHUB_REF", "refs/heads/main")
+    monkeypatch.setenv("CI_RUN_ID", "123456")
+    monkeypatch.setenv("GITHUB_TOKEN", "read-only-test-token")
+    responses = {
+        f"/repos/{REPOSITORY}/actions/runs/123456": run(),
+        f"/repos/{REPOSITORY}/compare/{SHA}...main": {"status": "ahead"},
+        f"/repos/{REPOSITORY}/actions/runs/123456/artifacts": {"artifacts": [{"id": 12, "name": f"frontend-{SHA}", "expired": False}]},
+    }
+    def request(url: str, **kwargs: Any) -> tuple[int, Any]:
+        from urllib.parse import urlparse
+        return 200, responses[urlparse(url).path]
+
+    monkeypatch.setattr(ci_cd, "_request", request)
+    monkeypatch.setattr("sys.argv", ["ci_cd.py", "select-run"])
+    assert ci_cd.main() == 0
+    assert capsys.readouterr().out == f"123456 {SHA}\n"
 
 
 def test_run_id_accepts_digits_only() -> None:
