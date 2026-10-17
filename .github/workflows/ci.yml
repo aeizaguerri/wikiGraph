@@ -53,12 +53,23 @@ jobs:
 
       - name: Run Python tests
         run: uv run pytest
+        env:
+          WIKIGRAPH_GRAPH_CLICK_DIAGNOSTICS: "1"
 
       - name: Run mypy
         run: uv run mypy src
 
       - name: Run Cloudflare Worker tests
         run: node --test cloudflare/worker.test.js
+
+      - name: Upload graph click diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: graph-click-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: test-results/graph-click/
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Upload tested frontend static artifact
         if: success()
