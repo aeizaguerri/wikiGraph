@@ -124,7 +124,8 @@ export function createExperience(graphPayload, container, options = {}) {
 
   // Spotlight focus state: a reducer recipe, not an overlay pass. The node
   // and edge reducers below are driven entirely by `spotlightNode`.
-  const language = graphPayload.language ?? "es";
+  let language = graphPayload.language ?? "es";
+  let payloadSignature = JSON.stringify(graphPayload);
   const onSelection = options.onSelection ?? (() => {});
   let spotlightNode = null;
   let pinnedNode = null;
@@ -204,7 +205,8 @@ export function createExperience(graphPayload, container, options = {}) {
     labelColor: { color: LABEL_COLOR },
     labelRenderedSizeThreshold: ZOOM_THRESHOLD,
   });
-  const resizeObserver = new ResizeObserver(() => sigma.resize());
+  // Resizing clears canvas buffers; schedule a render even when physics is static.
+  const resizeObserver = new ResizeObserver(() => sigma.scheduleRefresh());
   resizeObserver.observe(container);
 
   // ---- physics lifecycle: settling → static, drag re-heats, then decays ----
@@ -319,9 +321,43 @@ export function createExperience(graphPayload, container, options = {}) {
     onSelection(null);
   });
 
+  function update(nextPayload) {
+    const signature = JSON.stringify(nextPayload);
+    if (signature === payloadSignature) return;
+    const next = toGraph(nextPayload);
+    language = nextPayload.language ?? "es";
+    // Reconcile in place: Sigma and its camera survive, as do existing positions.
+    // FA2 already observes topology events and coalesces its worker refresh.
+    for (const node of graph.nodes()) {
+      if (!next.hasNode(node)) graph.dropNode(node);
+    }
+    for (const node of next.nodes()) {
+      const attrs = next.getNodeAttributes(node);
+      if (graph.hasNode(node)) {
+        const { x, y, ...metadata } = attrs;
+        graph.mergeNodeAttributes(node, metadata);
+      } else {
+        graph.addNode(node, attrs);
+      }
+    }
+    for (const edge of graph.edges()) {
+      const [source, target] = graph.extremities(edge);
+      if (!next.hasDirectedEdge(source, target)) graph.dropEdge(edge);
+    }
+    next.forEachEdge((edge, attrs, source, target) => {
+      if (!graph.hasDirectedEdge(source, target)) graph.addEdge(source, target, attrs);
+    });
+    if (pinnedNode && !graph.hasNode(pinnedNode)) pinnedNode = null;
+    if (hoverNode && !graph.hasNode(hoverNode)) hoverNode = null;
+    setSpotlight(pinnedNode ?? hoverNode);
+    onSelection(pinnedNode ? articleInfo(pinnedNode) : null);
+    payloadSignature = signature;
+  }
+
   return {
     graph,
     sigma,
+    update,
     getState: () => physicsState,
     getSpotlight: () => spotlightNode,
     getSelected: () => pinnedNode,

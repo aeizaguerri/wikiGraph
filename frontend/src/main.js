@@ -214,36 +214,39 @@ function renderLensButtons(lens) {
 }
 
 let currentExperience = null;
+let currentRunId = null;
 let activeLens = initialLens;
 
-// Ticket 11: the launch surface mounts every completed Graph the same way —
-// booting and swapping alike destroy the previous experience first.
+// Keep the renderer and layout across snapshots of the same run.
+// A different run still gets a fresh experience and selection state.
 function mountExperience(graphPayload) {
   showView("run");
-  if (currentExperience) {
-    currentExperience.destroy();
-    // The old selection card refers to the swapped-out Graph.
+  if (currentExperience && currentRunId === graphPayload.runId) {
+    currentExperience.update(graphPayload);
+  } else {
+    currentExperience?.destroy();
     infoCard.hidden = true;
+    currentRunId = graphPayload.runId;
+    currentExperience = createExperience(graphPayload, container, {
+      lens: activeLens,
+      onState(state) {
+        statusBox.textContent = PHYSICS_LABELS[state] ?? "";
+      },
+      onSelection(info) {
+        if (!info) {
+          infoCard.hidden = true;
+          return;
+        }
+        cardTitle.textContent = info.title;
+        cardLevel.textContent = `Level ${info.level}`;
+        cardDegree.textContent = `${info.degree} links`;
+        cardCommunity.textContent = `Community ${info.communityId}`;
+        cardLink.href = info.url;
+        cardLink.textContent = "Open on Wikipedia";
+        infoCard.hidden = false;
+      },
+    });
   }
-  currentExperience = createExperience(graphPayload, container, {
-    lens: activeLens,
-    onState(state) {
-      statusBox.textContent = PHYSICS_LABELS[state] ?? "";
-    },
-    onSelection(info) {
-      if (!info) {
-        infoCard.hidden = true;
-        return;
-      }
-      cardTitle.textContent = info.title;
-      cardLevel.textContent = `Level ${info.level}`;
-      cardDegree.textContent = `${info.degree} links`;
-      cardCommunity.textContent = `Community ${info.communityId}`;
-      cardLink.href = info.url;
-      cardLink.textContent = "Open on Wikipedia";
-      infoCard.hidden = false;
-    },
-  });
   activeLens = currentExperience.getLens();
   // Handle handed to the headless-browser seam (screen-level assertions).
   window.__wikigraph = currentExperience;
