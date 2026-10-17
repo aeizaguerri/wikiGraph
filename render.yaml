@@ -3,6 +3,7 @@ services:
     name: wikigraph-api
     runtime: python
     plan: starter
+    autoDeployTrigger: 'off'
     buildCommand: pip install uv && uv sync --frozen --no-dev
     startCommand: uv run uvicorn wikigraph.app:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /readyz
