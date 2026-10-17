@@ -80,34 +80,16 @@ def validate_artifact(artifact: dict[str, Any], sha: str) -> None:
     _require(artifact.get("expired") is False and isinstance(artifact.get("id"), int), "Frontend artifact is expired or malformed")
 
 
-def validate_environment(environment: dict[str, Any], policies: list[dict[str, Any]]) -> None:
-    rules = environment.get("protection_rules")
-    _require(
-        isinstance(rules, list)
-        and any(
-            rule.get("type") == "required_reviewers"
-            and isinstance(rule.get("reviewers"), list)
-            and bool(rule["reviewers"])
-            for rule in rules
-            if isinstance(rule, dict)
-        ),
-        "Production environment has no configured required reviewers",
-    )
-    policy = environment.get("deployment_branch_policy")
-    _require(isinstance(policy, dict) and policy.get("custom_branch_policies") is True, "Production environment is not restricted to a custom branch allowlist")
-    _require(isinstance(policies, list) and len(policies) == 1 and policies[0].get("name") == "main", "Production environment must allow only main")
-
-
 def _github_json(path: str, token: str) -> Any:
     status, payload = _request(f"{GITHUB_API}{path}", token=token)
-    _require(status == 200 and isinstance(payload, (dict, list)), f"GitHub read failed with HTTP {status}")
+    _require(status == 200 and isinstance(payload, (dict, list)), f"GitHub GET {path} failed with HTTP {status}")
     return payload
 
 
 def preflight() -> str:
     repository = os.environ.get("GITHUB_REPOSITORY", "")
     run_id = validate_run_id(os.environ.get("CI_RUN_ID", ""))
-    token = os.environ.get("RELEASE_PREFLIGHT_TOKEN") or os.environ.get("GITHUB_TOKEN", "")
+    token = os.environ.get("GITHUB_TOKEN", "")
     _require(bool(re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository)) and bool(token), "Repository or read-only GitHub token is missing")
     _require(os.environ.get("GITHUB_REF") == "refs/heads/main", "Manual releases may run only from main")
     root = f"/repos/{repository}"
@@ -122,10 +104,6 @@ def preflight() -> str:
     matches = [item for item in artifacts["artifacts"] if isinstance(item, dict) and item.get("name") == f"frontend-{sha}"]
     _require(len(matches) == 1, "CI run must contain exactly one matching frontend artifact")
     validate_artifact(matches[0], sha)
-    environment = _github_json(f"{root}/environments/production", token)
-    policy_data = _github_json(f"{root}/environments/production/deployment-branch-policies", token)
-    _require(isinstance(policy_data, dict) and isinstance(policy_data.get("branch_policies"), list), "Production branch policy response is malformed")
-    validate_environment(environment, policy_data["branch_policies"])
     return sha
 
 

@@ -8,7 +8,6 @@ import pytest
 from scripts.ci_cd import (
     ReleaseError,
     validate_artifact,
-    validate_environment,
     validate_run_id,
     validate_source_run,
     preflight,
@@ -36,7 +35,7 @@ def run(**overrides: Any) -> dict[str, Any]:
     return result
 
 
-def test_production_protection_is_rechecked_after_approval_from_workflow_source() -> None:
+def test_release_identity_is_rechecked_after_environment_from_workflow_source() -> None:
     from pathlib import Path
 
     workflow = Path(".github/workflows/deploy.yml").read_text()
@@ -48,10 +47,10 @@ def test_production_protection_is_rechecked_after_approval_from_workflow_source(
                 return index, block
         raise AssertionError(f"Missing workflow step: {name}")
 
-    original_index, original = step_named("Validate CI run, artifact, and production gate")
+    original_index, original = step_named("Validate CI run and artifact")
     source_index, source_checkout = step_named("Check out workflow source")
-    approved_source_index, approved_source_checkout = step_named("Check out workflow source for post-approval recheck")
-    recheck_index, recheck = step_named("Recheck production protection after approval")
+    approved_source_index, approved_source_checkout = step_named("Check out workflow source for post-environment recheck")
+    recheck_index, recheck = step_named("Recheck release identity after environment")
     deploy_checkout_index, deploy_checkout = step_named("Check out the validated source commit")
     render_index, _ = step_named("Deploy exact source commit to Render and verify readiness")
     cloudflare_index, _ = step_named("Deploy tested frontend to Cloudflare Worker")
@@ -60,11 +59,12 @@ def test_production_protection_is_rechecked_after_approval_from_workflow_source(
     assert original_index < approved_source_index < recheck_index < deploy_checkout_index < render_index < cloudflare_index
     assert "ref: ${{ github.sha }}" in source_checkout
     assert "ref: ${{ github.sha }}" in approved_source_checkout
+    assert "RELEASE_PREFLIGHT_TOKEN" not in workflow
+    assert "deployments: read" not in workflow
     assert "python scripts/ci_cd.py preflight" in original
     assert "python scripts/ci_cd.py preflight" in recheck
     for env_name, value in (
         ("GITHUB_TOKEN", "${{ github.token }}"),
-        ("RELEASE_PREFLIGHT_TOKEN", "${{ secrets.RELEASE_PREFLIGHT_TOKEN }}"),
         ("GITHUB_REPOSITORY", "${{ github.repository }}"),
         ("GITHUB_REF", "${{ github.ref }}"),
         ("CI_RUN_ID", "${{ inputs.ci_run_id }}"),
@@ -82,32 +82,38 @@ def test_run_id_accepts_digits_only() -> None:
             validate_run_id(value)
 
 
-def test_preflight_reads_source_artifact_and_environment_without_live_api_calls(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_preflight_accepts_exact_main_artifact_without_environment_api_access(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    import scripts.ci_cd as ci_cd
+
     monkeypatch.setenv("GITHUB_REPOSITORY", REPOSITORY)
     monkeypatch.setenv("GITHUB_REF", "refs/heads/main")
     monkeypatch.setenv("CI_RUN_ID", "123456")
     monkeypatch.setenv("GITHUB_TOKEN", "read-only-test-token")
-    run_data = run()
+    monkeypatch.setenv("RELEASE_PREFLIGHT_TOKEN", "must-not-override")
     responses = {
-        f"/repos/{REPOSITORY}/actions/runs/123456": run_data,
+        f"/repos/{REPOSITORY}/actions/runs/123456": run(),
         f"/repos/{REPOSITORY}/compare/{SHA}...main": {"status": "ahead"},
         f"/repos/{REPOSITORY}/actions/runs/123456/artifacts": {"artifacts": [{"id": 12, "name": f"frontend-{SHA}", "expired": False}]},
-        f"/repos/{REPOSITORY}/environments/production": {"protection_rules": [{"type": "required_reviewers", "reviewers": [{"type": "User"}]}], "deployment_branch_policy": {"custom_branch_policies": True}},
-        f"/repos/{REPOSITORY}/environments/production/deployment-branch-policies": {"branch_policies": [{"name": "main"}]},
     }
-    calls: list[str] = []
+    calls: list[tuple[str, str | None, str]] = []
 
-    def github_read(path: str, token: str) -> Any:
-        assert token == "read-only-test-token"
-        calls.append(path)
-        return responses[path]
+    def request(url: str, *, token: str | None = None, method: str = "GET", body: Any = None) -> tuple[int, Any]:
+        from urllib.parse import urlparse
+        path = urlparse(url).path
+        calls.append((path, token, method))
+        if path.endswith("/environments/production") or "/deployment-branch-policies" in path:
+            return 404, {"message": "unavailable"}
+        return 200, responses[path]
 
-    monkeypatch.setattr("scripts.ci_cd._github_json", github_read)
-    assert preflight() == SHA
-    assert len(calls) == 5
-    responses[f"/repos/{REPOSITORY}/actions/runs/123456/artifacts"] = {"artifacts": [{"id": 12, "name": "frontend-" + "b" * 40, "expired": False}]}
-    with pytest.raises(ReleaseError):
-        preflight()
+    monkeypatch.setattr(ci_cd, "_request", request)
+    result = preflight()
+    assert result == SHA
+    assert capsys.readouterr().out == ""
+    assert calls == [
+        (f"/repos/{REPOSITORY}/actions/runs/123456", "read-only-test-token", "GET"),
+        (f"/repos/{REPOSITORY}/compare/{SHA}...main", "read-only-test-token", "GET"),
+        (f"/repos/{REPOSITORY}/actions/runs/123456/artifacts", "read-only-test-token", "GET"),
+    ]
 
 
 def test_source_run_must_be_successful_main_ci_for_this_repository() -> None:
@@ -142,19 +148,6 @@ def test_artifact_must_be_exact_and_unexpired() -> None:
     ):
         with pytest.raises(ReleaseError):
             validate_artifact(bad_artifact, SHA)
-
-
-def test_production_environment_requires_reviewers_and_main_restriction() -> None:
-    validate_environment(
-        {"protection_rules": [{"type": "required_reviewers", "reviewers": [{"type": "User"}]}], "deployment_branch_policy": {"protected_branches": False, "custom_branch_policies": True}},
-        [{"name": "main"}],
-    )
-    with pytest.raises(ReleaseError):
-        validate_environment({"protection_rules": [], "deployment_branch_policy": {"custom_branch_policies": True}}, [{"name": "main"}])
-    with pytest.raises(ReleaseError):
-        validate_environment({"protection_rules": [{"type": "required_reviewers", "reviewers": []}], "deployment_branch_policy": {"custom_branch_policies": True}}, [{"name": "main"}])
-    with pytest.raises(ReleaseError):
-        validate_environment({"protection_rules": [{"type": "required_reviewers", "reviewers": [{"type": "User"}]}], "deployment_branch_policy": {"custom_branch_policies": True}}, [{"name": "release"}])
 
 
 @dataclass

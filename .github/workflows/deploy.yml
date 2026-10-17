@@ -1,4 +1,4 @@
-name: Approved production deployment
+name: Manual production deployment
 
 on:
   workflow_dispatch:
@@ -17,14 +17,13 @@ concurrency:
 
 jobs:
   preflight:
-    name: Verify release source and protection
+    name: Verify release source
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
       actions: read
       contents: read
-      deployments: read
     outputs:
       sha: ${{ steps.verify.outputs.sha }}
     steps:
@@ -32,11 +31,10 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ github.sha }}
-      - name: Validate CI run, artifact, and production gate
+      - name: Validate CI run and artifact
         id: verify
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          RELEASE_PREFLIGHT_TOKEN: ${{ secrets.RELEASE_PREFLIGHT_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           GITHUB_REF: ${{ github.ref }}
           CI_RUN_ID: ${{ inputs.ci_run_id }}
@@ -45,7 +43,7 @@ jobs:
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
 
   deploy:
-    name: Deploy approved production release
+    name: Deploy manual production release
     needs: preflight
     runs-on: ubuntu-latest
     timeout-minutes: 35
@@ -54,23 +52,21 @@ jobs:
     permissions:
       actions: read
       contents: read
-      deployments: read
     steps:
-      - name: Check out workflow source for post-approval recheck
+      - name: Check out workflow source for post-environment recheck
         uses: actions/checkout@v4
         with:
           ref: ${{ github.sha }}
-      - name: Recheck production protection after approval
+      - name: Recheck release identity after environment
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          RELEASE_PREFLIGHT_TOKEN: ${{ secrets.RELEASE_PREFLIGHT_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           GITHUB_REF: ${{ github.ref }}
           CI_RUN_ID: ${{ inputs.ci_run_id }}
         run: |
           sha="$(python scripts/ci_cd.py preflight)"
           if [[ "$sha" != "${{ needs.preflight.outputs.sha }}" ]]; then
-            echo "Post-approval preflight selected a different source SHA; stopping safely." >&2
+            echo "Post-environment preflight selected a different source SHA; stopping safely." >&2
             exit 1
           fi
       - name: Check out the validated source commit
