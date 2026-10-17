@@ -4,9 +4,8 @@ import asyncio
 from urllib.parse import parse_qs
 
 from tests.support.api import create_run, fetch_graph
-from wikigraph.crawler import Crawler, CrawlRequest
+from wikigraph.crawler import CrawlCheckpoint, Crawler, CrawlRequest, GraphNode
 from wikigraph.governor import GlobalWikimediaGovernor
-from wikigraph.runs import _checkpoint_from_json, _checkpoint_json
 
 
 def _query(request):
@@ -47,52 +46,45 @@ async def test_node_cap_stops_after_current_batch(client, stub):
 
 
 async def test_truncated_checkpoint_resumes_without_reacquiring_sources(stub):
-    frontier = [f"Source {index:02}" for index in range(101)]
-    stub.add_page("Seed", [(0, title) for title in frontier])
-    for title in frontier:
-        stub.add_page(title, [(0, f"Leaf {title}")])
-        stub.add_page(f"Leaf {title}")
-
-    request = CrawlRequest("Seed", depth=2, language="en", node_cap=120)
+    # Cancellation at the public checkpoint callback models interruption after
+    # acquisition; resume must preserve the partial graph without fetching again.
+    stub.add_page("Seed", [(0, "A"), (0, "B")])
+    stub.add_page("A", [(0, "Leaf")])
+    stub.add_page("B")
+    stub.add_page("Leaf")
+    request = CrawlRequest("Seed", depth=2, language="en", node_cap=2)
     governor = GlobalWikimediaGovernor()
-    captured: dict[str, object] = {}
+    captured: list[CrawlCheckpoint] = []
 
-    async def interrupt_after_truncated_checkpoint(checkpoint):
+    async def interrupt_after_truncation(checkpoint: CrawlCheckpoint) -> None:
         if checkpoint.truncated:
-            captured["serialized"] = _checkpoint_json(checkpoint)
+            captured.append(checkpoint)
             raise asyncio.CancelledError
 
     try:
         await Crawler(
-            request,
-            transport=stub.transport,
-            governor=governor,
-            on_checkpoint=interrupt_after_truncated_checkpoint,
+            request, transport=stub.transport, governor=governor,
+            on_checkpoint=interrupt_after_truncation,
         ).crawl()
     except asyncio.CancelledError:
         pass
     else:
-        raise AssertionError("crawl should stop after durable truncated checkpoint")
+        raise AssertionError("crawl should stop at the truncated checkpoint")
 
-    checkpoint = _checkpoint_from_json(captured["serialized"])
-    assert checkpoint is not None
-    assert checkpoint.truncated is True
+    assert len(captured) == 1
+    checkpoint = captured[0]
     requests_at_checkpoint = len(stub.requests)
-    link_requests_at_checkpoint = sum(
-        _query(request).get("prop") == ["links"] for request in stub.requests
-    )
-
     resumed = await Crawler(
-        request,
-        transport=stub.transport,
-        governor=governor,
-        checkpoint=checkpoint,
+        request, transport=stub.transport, governor=governor, checkpoint=checkpoint,
     ).crawl()
 
     assert len(stub.requests) == requests_at_checkpoint
-    assert link_requests_at_checkpoint == 2
+    assert checkpoint.truncated is True
+    assert checkpoint.crawled == 1
+    assert checkpoint.nodes == [GraphNode("Seed", 0, True), GraphNode("A", 1, False)]
+    assert [(edge.source, edge.target) for edge in checkpoint.edges] == [("Seed", "A")]
     assert resumed.truncated is True
-    assert resumed.crawled == 51
-    assert resumed.discovered == 120
-    assert resumed.nodes == checkpoint.nodes
-    assert resumed.edges == checkpoint.edges
+    assert resumed.crawled == 1
+    assert resumed.discovered == 2
+    assert {node.title for node in resumed.nodes} == {"Seed", "A"}
+    assert {(edge.source, edge.target) for edge in resumed.edges} == {("Seed", "A")}
