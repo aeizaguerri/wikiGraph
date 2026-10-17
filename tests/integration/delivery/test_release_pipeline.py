@@ -21,6 +21,38 @@ SHA = "a" * 40
 REPOSITORY = "aeizaguerri/wikiGraph"
 
 
+def test_ci_runs_frontend_and_python_test_levels_in_order_with_browser_diagnostics_scoped() -> None:
+    from pathlib import Path
+
+    workflow = Path(".github/workflows/ci.yml").read_text()
+    steps = workflow.split("      - name: ")[1:]
+
+    def step_named(name: str) -> tuple[int, str]:
+        for index, block in enumerate(steps):
+            if block.startswith(name + "\n"):
+                return index, block
+        raise AssertionError(f"Missing CI workflow step: {name}")
+
+    install_index, _ = step_named("Install frontend dependencies")
+    frontend_index, frontend = step_named("Run frontend unit tests")
+    build_index, _ = step_named("Build frontend")
+    unit_index, unit = step_named("Run Python unit tests")
+    integration_index, integration = step_named("Run Python integration tests")
+    chromium_index, _ = step_named("Install Chromium for browser tests")
+    e2e_index, e2e = step_named("Run Python end-to-end tests")
+    mypy_index, _ = step_named("Run mypy")
+    worker_index, worker = step_named("Run Cloudflare Worker tests")
+
+    assert install_index < frontend_index < build_index < unit_index < integration_index < chromium_index < e2e_index < mypy_index < worker_index
+    assert "npm --prefix frontend test" in frontend
+    assert "uv run pytest tests/unit" in unit
+    assert "uv run pytest tests/integration" in integration
+    assert "uv run pytest tests/e2e" in e2e
+    assert 'WIKIGRAPH_GRAPH_CLICK_DIAGNOSTICS: "1"' in e2e
+    assert "WIKIGRAPH_GRAPH_CLICK_DIAGNOSTICS" not in unit + integration
+    assert "node --test cloudflare/worker.test.js" in worker
+
+
 def run(**overrides: Any) -> dict[str, Any]:
     result: dict[str, Any] = {
         "repository": {"full_name": REPOSITORY},

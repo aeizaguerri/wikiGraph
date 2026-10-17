@@ -17,17 +17,17 @@ The local default uses in-memory run storage and is for development; its runs do
 
 ### Launch and input
 
-A run accepts a Wikipedia article title or an HTTP(S) URL on a Wikipedia subdomain. URL edition and the selected `es`/`en` edition must agree. The seed is normalized and resolved through MediaWiki; missing pages and non-article namespaces are rejected. Launch input is `seed`, `language` (`es` or `en`, default `es`), `depth` (1–3, API default 1), and `nodeCap` (1–5000, API default 500). The UI currently initializes depth 2 and cap 500. References: [`seed.py`](src/wikigraph/seed.py), [`app.py`](src/wikigraph/app.py), [`launcher.js`](frontend/src/launcher.js); tests: [`test_ticket02_normalization.py`](tests/integration/api/test_article_resolution.py), [`test_ticket05_input_surface.py`](tests/integration/api/test_launch_input.py), [`test_ticket27_launch_protection.py`](tests/integration/api/test_launch_protection.py).
+A run accepts a Wikipedia article title or an HTTP(S) URL on a Wikipedia subdomain. URL edition and the selected `es`/`en` edition must agree. The seed is normalized and resolved through MediaWiki; missing pages and non-article namespaces are rejected. Launch input is `seed`, `language` (`es` or `en`, default `es`), `depth` (1–3, API default 1), and `nodeCap` (1–5000, API default 500). The UI currently initializes depth 2 and cap 500. References: [`seed.py`](src/wikigraph/seed.py), [`app.py`](src/wikigraph/app.py), [`launcher.js`](frontend/src/launcher.js); tests: [`test_article_resolution.py`](tests/integration/api/test_article_resolution.py), [`test_launch_input.py`](tests/integration/api/test_launch_input.py), [`test_launch_protection.py`](tests/integration/api/test_launch_protection.py).
 
 ### Crawl and graph semantics
 
-The crawler traverses breadth-first, one depth level at a time, and crawls each canonical article once. It follows links in the chosen edition, resolves redirects, and excludes missing pages and non-article namespaces. The graph is directed: an article linking to another creates a source-to-target edge; cycles and reciprocal links are retained. Nodes are unique by canonical title and edges are deduplicated. The node cap bounds nodes; when discovery would exceed it, the graph is marked truncated and edges to absent nodes are omitted. Thus the returned graph has no dangling edges and `discovered` equals its node count. `crawled` counts source articles actually fetched, which may be lower than discovered. References: [`crawler.py`](src/wikigraph/crawler.py), [`mediawiki.py`](src/wikigraph/mediawiki.py); tests: [`test_ticket04_deep_crawl.py`](tests/integration/api/test_crawl_depth.py), [`test_ticket29_node_cap_stops_frontier.py`](tests/integration/api/test_node_cap.py).
+The crawler traverses breadth-first, one depth level at a time, and crawls each canonical article once. It follows links in the chosen edition, resolves redirects, and excludes missing pages and non-article namespaces. The graph is directed: an article linking to another creates a source-to-target edge; cycles and reciprocal links are retained. Nodes are unique by canonical title and edges are deduplicated. The node cap bounds nodes; when discovery would exceed it, the graph is marked truncated and edges to absent nodes are omitted. Thus the returned graph has no dangling edges and `discovered` equals its node count. `crawled` counts source articles actually fetched, which may be lower than discovered. References: [`crawler.py`](src/wikigraph/crawler.py), [`mediawiki.py`](src/wikigraph/mediawiki.py); tests: [`test_crawl_depth.py`](tests/integration/api/test_crawl_depth.py), [`test_node_cap.py`](tests/integration/api/test_node_cap.py).
 
-A completed run is partitioned server-side with NetworkX Louvain on the directed graph, fixed seed 0 and resolution 1.0. IDs are normalized by descending community size, then lexicographically by smallest member title; ID 0 is the largest group. Graph payloads include `communityCount` and `modularity`. References: [`communities.py`](src/wikigraph/communities.py), [`runs.py`](src/wikigraph/runs.py); tests: [`test_v2_ticket06_community_detection.py`](tests/integration/api/test_communities.py).
+A completed run is partitioned server-side with NetworkX Louvain on the directed graph, fixed seed 0 and resolution 1.0. IDs are normalized by descending community size, then lexicographically by smallest member title; ID 0 is the largest group. Graph payloads include `communityCount` and `modularity`. References: [`communities.py`](src/wikigraph/communities.py), [`runs.py`](src/wikigraph/runs.py); tests: [`test_communities.py`](tests/integration/api/test_communities.py).
 
 ### User experience
 
-The launcher accepts text or a pasted Wikipedia URL, edition and depth controls, and a node cap. It locks the form during launch, reports inline errors/progress, and displays crawled versus discovered counts. The graph view is a directed Sigma/Graphology canvas: node size reflects degree; color can encode community or crawl level; hovering previews an article, clicking pins it, and the backdrop clears selection. The initial layout settles, becomes static, and reheats briefly on actual node dragging. Article details link to the selected Wikipedia edition. See [`launcher.js`](frontend/src/launcher.js), [`experience.js`](frontend/src/experience.js), and UI tests [`test_v2_ticket05_view.py`](tests/e2e/test_graph_view.py) through [`test_v2_ticket12_launcher_completeness.py`](tests/e2e/test_launcher_accessibility.py).
+The launcher accepts text or a pasted Wikipedia URL, edition and depth controls, and a node cap. It locks the form during launch, reports inline errors/progress, and displays crawled versus discovered counts. The graph view is a directed Sigma/Graphology canvas: node size reflects degree; color can encode community or crawl level; hovering previews an article, clicking pins it, and the backdrop clears selection. The initial layout settles, becomes static, and reheats briefly on actual node dragging. Article details link to the selected Wikipedia edition. See [`launcher.js`](frontend/src/launcher.js), [`experience.js`](frontend/src/experience.js), and UI tests [`test_graph_view.py`](tests/e2e/test_graph_view.py) through [`test_launcher_accessibility.py`](tests/e2e/test_launcher_accessibility.py).
 
 ## API and run lifecycle
 
@@ -44,16 +44,16 @@ The API is implemented in [`app.py`](src/wikigraph/app.py); request/response mod
 | `POST /api/operator/runs/{runId}/cancel` | Optional operator-only durable cancellation; requires its separate configured bearer token. |
 | `GET /healthz`, `GET /readyz` | Process liveness and persistence readiness, respectively. |
 
-The durable production store records progress/checkpoints and uses ownership leases so a retry can resume without publishing partial work as a completed Graph. Completed graphs expire after seven days; non-completed run records have a 24-hour expiry. Cleanup runs at startup and every 15 minutes by default (`WIKIGRAPH_RETENTION_INTERVAL_SECONDS` can override with a positive value). Expiration removes reconstructive graph/checkpoint data while retaining an expired tombstone so a known expired URL is distinguishable from an unknown run. These are source/configured semantics, not evidence of elapsed production retention. References: [`runs.py`](src/wikigraph/runs.py), migrations [`00000`](supabase/migrations/20260922000000_crawl_runs.sql) and [`00004`](supabase/migrations/20260922000004_run_retention.sql); tests: [`test_ticket20_persisted_runs.py`](tests/integration/persistence/simulated/test_run_lifecycle.py), [`test_ticket21_frontier_checkpoints.py`](tests/integration/persistence/simulated/test_checkpoints.py), [`test_ticket26_retention.py`](tests/integration/persistence/postgres/test_retention.py).
+The durable production store records progress/checkpoints and uses ownership leases so a retry can resume without publishing partial work as a completed Graph. Completed graphs expire after seven days; non-completed run records have a 24-hour expiry. Cleanup runs at startup and every 15 minutes by default (`WIKIGRAPH_RETENTION_INTERVAL_SECONDS` can override with a positive value). Expiration removes reconstructive graph/checkpoint data while retaining an expired tombstone so a known expired URL is distinguishable from an unknown run. These are source/configured semantics, not evidence of elapsed production retention. References: [`runs.py`](src/wikigraph/runs.py), migrations [`00000`](supabase/migrations/20260922000000_crawl_runs.sql) and [`00004`](supabase/migrations/20260922000004_run_retention.sql); tests: [`test_run_lifecycle.py`](tests/integration/persistence/simulated/test_run_lifecycle.py), [`test_checkpoints.py`](tests/integration/persistence/simulated/test_checkpoints.py), [`test_retention.py`](tests/integration/persistence/postgres/test_retention.py).
 
 ## Architecture decisions
 
 These four decisions were consolidated from the former ADR documents; rationale and constraints are retained here.
 
-1. **Graph, not tree.** Wikipedia links contain cycles and shared targets. A tree duplicates the same article beneath multiple parents and obscures cycles; the graph represents each canonical article once and each discovered directed relation as an edge. See [`crawler.py`](src/wikigraph/crawler.py) and [`test_ticket04_deep_crawl.py`](tests/integration/api/test_crawl_depth.py).
-2. **Truncation preserves referential integrity.** At the node cap, omit links to nodes that could not be admitted. Keeping dangling edges would let renderers fabricate phantom nodes and make counts misleading. See [`crawler.py`](src/wikigraph/crawler.py) and [`test_ticket29_node_cap_stops_frontier.py`](tests/integration/api/test_node_cap.py).
-3. **Community detection uses directed modularity.** Pass the directed graph unchanged to NetworkX rather than inventing an undirected projection/deduplication convention or adding a heavier alternate dependency. Fixed seed/resolution and normalized IDs make results deterministic for a pinned library version. See [`communities.py`](src/wikigraph/communities.py), [`pyproject.toml`](pyproject.toml), and [`test_v2_ticket06_community_detection.py`](tests/integration/api/test_communities.py).
-4. **Wikimedia overload handling honors provider backpressure.** HTTP 429/503 and `maxlag` trigger retries with `Retry-After`/lag when supplied, capped at 45 seconds; otherwise bounded jittered exponential delay is used, up to ten attempts. The shared governor applies cooldown to later requests rather than letting each crawl loop bypass a common budget. Exhaustion surfaces an overload-waiting run that can be retried. See [`mediawiki.py`](src/wikigraph/mediawiki.py), [`governor.py`](src/wikigraph/governor.py), and [`test_ticket23_overload_recovery.py`](tests/integration/mediawiki/test_overload_recovery.py).
+1. **Graph, not tree.** Wikipedia links contain cycles and shared targets. A tree duplicates the same article beneath multiple parents and obscures cycles; the graph represents each canonical article once and each discovered directed relation as an edge. See [`crawler.py`](src/wikigraph/crawler.py) and [`test_crawl_depth.py`](tests/integration/api/test_crawl_depth.py).
+2. **Truncation preserves referential integrity.** At the node cap, omit links to nodes that could not be admitted. Keeping dangling edges would let renderers fabricate phantom nodes and make counts misleading. See [`crawler.py`](src/wikigraph/crawler.py) and [`test_node_cap.py`](tests/integration/api/test_node_cap.py).
+3. **Community detection uses directed modularity.** Pass the directed graph unchanged to NetworkX rather than inventing an undirected projection/deduplication convention or adding a heavier alternate dependency. Fixed seed/resolution and normalized IDs make results deterministic for a pinned library version. See [`communities.py`](src/wikigraph/communities.py), [`pyproject.toml`](pyproject.toml), and [`test_communities.py`](tests/integration/api/test_communities.py).
+4. **Wikimedia overload handling honors provider backpressure.** HTTP 429/503 and `maxlag` trigger retries with `Retry-After`/lag when supplied, capped at 45 seconds; otherwise bounded jittered exponential delay is used, up to ten attempts. The shared governor applies cooldown to later requests rather than letting each crawl loop bypass a common budget. Exhaustion surfaces an overload-waiting run that can be retried. See [`mediawiki.py`](src/wikigraph/mediawiki.py), [`governor.py`](src/wikigraph/governor.py), and [`test_overload_recovery.py`](tests/integration/mediawiki/test_overload_recovery.py).
 
 ## Security and privacy
 
@@ -66,22 +66,42 @@ These four decisions were consolidated from the former ADR documents; rationale 
 
 ## Local development and checks
 
+Run the fast pure-rule checks (install frontend dependencies once first with `npm --prefix frontend ci`):
+
 ```sh
-uv sync
+uv run pytest tests/unit
+npm --prefix frontend test
+```
+
+Python API and module integration tests use local deterministic fakes/stubs for upstream Wikimedia behavior:
+
+```sh
+uv run pytest tests/integration
+```
+
+This includes `tests/integration/persistence/postgres` tests, which are explicitly optional: each uses its existing `WIKIGRAPH_TICKETxx_*` configuration/credential guards and skips when required values are absent. Set only the existing test-specific variables described by those tests when using an authorized local PostgREST/database harness; do not place credentials in source control. A skipped credential-gated check is not a database pass.
+
+Browser E2E requires the frontend build and Chromium:
+
+```sh
+npm --prefix frontend run build
+uv run playwright install chromium
+uv run pytest tests/e2e
+```
+
+Run the complete suite and the other project checks with:
+
+```sh
 uv run pytest
 uv run mypy src
-npm --prefix frontend ci
-npm --prefix frontend run build
 node --test cloudflare/worker.test.js
 ```
 
-The two tests specific to retired benchmarks have been removed. Product regression tests share `DeterministicClock` from [`tests/support/api.py`](tests/support/api.py); they do not depend on the benchmark package.
-
-Python tests use pytest/pytest-asyncio (configured in [`pyproject.toml`](pyproject.toml)); the package has no configured frontend Node test script, but the Cloudflare Worker has a direct Node test file. Some Supabase/PostgREST integration tests need the repository's local database harness and environment; see the test setup in [`tests/conftest.py`](tests/conftest.py) and [`tests/integration/persistence/postgres/test_runtime_roles.py`](tests/integration/persistence/postgres/test_runtime_roles.py). Do not infer that an unrun command passed, or that an isolated unit/integration test proves a hosted deployment property.
+`uv run pytest` remains the all-Python-tests command. [`tests/scenarios.tsv`](tests/scenarios.tsv) records the original Python and Worker scenarios and their current destinations as provenance for the reorganization; it is an inventory, not test execution evidence. The Worker tests remain a separate Node command. Local fake-upstream tests verify application behavior against controlled responses; they do not exercise hosted Wikimedia or prove hosted E2E/deployment properties.
 
 ### Continuous integration
 
-GitHub Actions runs [`ci.yml`](.github/workflows/ci.yml) for pull requests and pushes to `main`. It installs Python dependencies from `uv.lock` with `uv sync --frozen --all-groups`, builds the frontend before running pytest, provisions Chromium for browser tests, then runs `uv run mypy src` and the Cloudflare Worker Node tests. The workflow uses Python 3.12, uv 0.9.25, and Node.js 22.12.0 or newer within the Node 22 release line.
+GitHub Actions runs [`ci.yml`](.github/workflows/ci.yml) for pull requests and pushes to `main`. It installs Python dependencies from `uv.lock` with `uv sync --frozen --all-groups`, installs frontend dependencies and runs the frontend unit command before building, then runs separately named Python unit, integration, and browser E2E commands (installing Chromium before E2E). It follows with `uv run mypy src` and the Cloudflare Worker Node tests. The workflow uses Python 3.12, uv 0.9.25, and Node.js 22.12.0 or newer within the Node 22 release line.
 
 CI is intentionally secret-free: it does not receive hosted or production database credentials, so database integrations requiring configured PostgREST credentials are not enabled there. The CI artifact is the built `src/wikigraph/static/` directory—not a promise that rebuilt hash-named files match generated files committed in the source tree. It is uploaded only after every check passes, named `frontend-<checked SHA>`, and retained for 30 days. The affected graph-click browser test opts into Playwright tracing in CI; retrieve `graph-click-<SHA>-<run ID>-<attempt>` from that run's Artifacts (7-day retention) for `trace.zip`, `screenshot.png`, and bounded `diagnostics.json`. The artifact is attempted even when tests fail and is harmlessly absent if the targeted test never runs. To capture locally, run that test with `WIKIGRAPH_GRAPH_CLICK_DIAGNOSTICS=1`; evidence is written under ignored `test-results/graph-click/` only when using the local stub server. Tracing may perturb timing, and a passing instrumented run is not proof of a fix. For a pull request, the checked SHA is GitHub's synthetic merge commit SHA; on a push to `main`, it is the pushed commit SHA. A later manual deployment must use the artifact from the successful `main` push for the exact source commit being deployed, rather than rebuilding a different revision.
 
@@ -112,7 +132,7 @@ Render's [`render.yaml`](render.yaml) defines the Python web service (`uv` insta
 
 Before runtime deployment, an authorized operator must apply every migration in [`supabase/migrations/`](supabase/migrations/) in order, including runtime security `20260922000005` and cancellation `20260928000010` if the deployed runtime enables that endpoint. Verify `/readyz` against the intended Supabase project. It checks canonical database readiness; it does **not** prove the optional cancellation RPC works. Run authorized local PostgREST tests for optional RPC capability. Failed migration, readiness, or smoke checks reject cutover; there is no automatic fallback to an in-memory store.
 
-Migration `20260924000006_bound_cache_identity_index.sql` changes the oversized cache uniqueness index. Its recorded migration procedure takes an `ACCESS EXCLUSIVE` table lock while changing the constraint/index. Plan and authorize this operational impact; apply the migration before a runtime relying on it. A production cache-write failure was historically traced to PostgreSQL index row-size limits; do not repeat heavy runs against a schema lacking the fix. See migration [`00006`](supabase/migrations/20260924000006_bound_cache_identity_index.sql) and tests [`test_ticket29_cache_index.py`](tests/integration/persistence/postgres/test_cache_identity.py).
+Migration `20260924000006_bound_cache_identity_index.sql` changes the oversized cache uniqueness index. Its recorded migration procedure takes an `ACCESS EXCLUSIVE` table lock while changing the constraint/index. Plan and authorize this operational impact; apply the migration before a runtime relying on it. A production cache-write failure was historically traced to PostgreSQL index row-size limits; do not repeat heavy runs against a schema lacking the fix. See migration [`00006`](supabase/migrations/20260924000006_bound_cache_identity_index.sql) and tests [`test_cache_identity.py`](tests/integration/persistence/postgres/test_cache_identity.py).
 
 Each newly created run snapshots `WIKIGRAPH_RUN_ATTEMPT_QUOTA` (default 120, must be positive). Raising the service setting affects new runs only; an existing retry retains the original snapshot and quota already spent. Do not launch concurrent production runs by default; the governor remains shared and provider-limited.
 
@@ -139,7 +159,7 @@ Before deployment, verify the selected Cloudflare account and its plan/billing/r
 
 ## Verification status and production gaps
 
-**This documentation change has not run behavior tests, a build, a database migration, a hosted smoke test, or a deployment.** Source and test references above identify implemented/tested contracts, not checks executed in this change. Historical ticket-29 reports recorded successful bounded local tests and selected hosted smokes, but also recorded that the automated gate exited 1 and that production acceptance remained incomplete. A past result is not current deployment evidence.
+**The earlier documentation consolidation did not run behavior tests, a build, a database migration, a hosted smoke test, or a deployment.** Local regression checks for later changes do not establish hosted or production acceptance. Source and test references above identify implemented/tested contracts, not checks executed in this change. Historical ticket-29 reports recorded successful bounded local tests and selected hosted smokes, but also recorded that the automated gate exited 1 and that production acceptance remained incomplete. A past result is not current deployment evidence.
 
 The historical ticket-29 disposition explicitly accepted issue closure while all nine original production criteria remained unproven/incomplete; closure was an owner risk waiver, not nine passes. The historical states and outstanding proof are:
 
