@@ -97,7 +97,24 @@ uv run mypy src
 node --test cloudflare/worker.test.js
 ```
 
-`uv run pytest` remains the all-Python-tests command. [`tests/scenarios.tsv`](tests/scenarios.tsv) records the original Python and Worker scenarios and their current destinations as provenance for the reorganization; it is an inventory, not test execution evidence. The Worker tests remain a separate Node command. Local fake-upstream tests verify application behavior against controlled responses; they do not exercise hosted Wikimedia or prove hosted E2E/deployment properties.
+`uv run pytest` remains the all-Python-tests command. [`tests/scenarios.tsv`](tests/scenarios.tsv) maps original Python and Worker scenarios to their current behavior checks. The mapping is many-to-many: a composite scenario may be split, and several redundant scenarios may share a surviving check. It is provenance, not execution evidence or a coverage percentage. The Worker tests remain a separate Node command. Local fake-upstream tests do not exercise hosted Wikimedia or prove hosted E2E/deployment properties.
+
+### Choosing the test level
+
+Preserve observable behavior, not each existing test. Use the narrowest public interface that can expose the regression:
+
+| Level | What earns a check here |
+|---|---|
+| Python/frontend unit | Seed parsing and errors, community ordering, color/size rules, URL encoding, and launch limits. Expected results come from independent examples, not the implementation's own helpers. |
+| API integration | HTTP validation, status/payload shapes, admission, SSE, retry, redaction, and graph counters. These are different guarantees from the pure rules behind the routes. |
+| Provider/cache integration | Pagination, batching, bounded retries, cache identity isolation, provider charges, and fail-open/fail-closed behavior at controlled HTTP seams. |
+| Persistence integration | Public snapshot/lifecycle and adapter contracts. Keep real database transactions, cross-client visibility, locks, roles, and RPC guarantees in the credential-gated Postgres group. |
+| Browser E2E | Actual launch/reopen, keyboard interaction, live progress/failure, URL-restored rendering, canvas colors/sizes, selection, and physics. A correct color helper alone does not prove that the browser paints it. |
+| Worker/release integration | Public request dispatch, headers, incremental SSE, origin failure, exact release identity, and no duplicate deployment requests. |
+
+The shared fake-upstream API fixture runs the real governor with the existing deterministic clock instead of waiting for provider-budget delays. Dedicated governor tests still assert rate, quota, fairness, and concurrency guarantees. Browser layout/stability checks retain the real browser where elapsed behavior is the guarantee. Cache timeout tests verify the configured httpx request budget and handling of transport timeout exceptions; they do not claim to test socket deadline enforcement.
+
+Before removing a costly or redundant case, identify its surviving test and the observable assertion that replaces it. Do not substitute private storage mutation, export-list inspection, or a calculation repeated from production code for a behavior check. Mock external HTTP, persistence, and time where needed—not internal business logic. To check assertion quality, bounded isolated fault probes can establish that a plausible regression actually fails; selected caught faults are not a global mutation score. Missing database/provider infrastructure remains an explicit gap, never a pass.
 
 ### Continuous integration
 
