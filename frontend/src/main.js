@@ -1,7 +1,5 @@
-import {
-  createExperience,
-  parseLens,
-} from "./experience.js";
+import { createExperience } from "./experience.js";
+import { parseLens } from "./graph-style.js";
 import { createLauncher } from "./launcher.js";
 import "./style.css";
 

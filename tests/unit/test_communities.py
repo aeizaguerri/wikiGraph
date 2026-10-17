@@ -1,5 +1,7 @@
 """Pure-rule tests for deterministic community assignment."""
 
+from collections import Counter
+
 from wikigraph.communities import detect_communities
 from wikigraph.crawler import GraphEdge, GraphNode
 
@@ -54,9 +56,7 @@ def test_biggest_community_gets_id_0():
 
     assignment = detect_communities(nodes, edges)
 
-    sizes: dict[int, int] = {}
-    for community_id in assignment.ids.values():
-        sizes[community_id] = sizes.get(community_id, 0) + 1
+    sizes = Counter(assignment.ids.values())
     assert sizes[0] == max(sizes.values())
     assert {"A1", "A2", "A3", "A4"} <= {
         title for title, community_id in assignment.ids.items() if community_id == 0
@@ -84,9 +84,7 @@ def test_size_ties_break_by_lexicographically_smallest_member():
     for title, community_id in assignment.ids.items():
         members.setdefault(community_id, []).append(title)
     by_id = sorted(members.items())
-    size_counts: dict[int, int] = {}
-    for _, member_titles in by_id:
-        size_counts[len(member_titles)] = size_counts.get(len(member_titles), 0) + 1
+    size_counts = Counter(len(member_titles) for _, member_titles in by_id)
     tied = [
         community_id
         for community_id, member_titles in by_id

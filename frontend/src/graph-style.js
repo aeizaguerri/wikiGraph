@@ -20,9 +20,9 @@ export const NEUTRAL_COLOR = "#808080";
 // Level lens (ticket 10): a 4-step ladder for the depth range 0-3, coolest
 // (brightest on the dark canvas) at the Seed page; levels beyond 3 — which
 // depth > 3 cannot produce — would fall back to the neutral gray.
-export const LEVEL_LADDER = ["#f2f6ff", "#a9c3ea", "#5f83ad", "#3a5372"];
-export const MIN_NODE_SIZE = 2.5;
-export const SIZE_GROWTH = 1.1;
+const LEVEL_LADDER = ["#f2f6ff", "#a9c3ea", "#5f83ad", "#3a5372"];
+const MIN_NODE_SIZE = 2.5;
+const SIZE_GROWTH = 1.1;
 
 export function communityColor(communityId) {
   return COMMUNITY_PALETTE[communityId] ?? NEUTRAL_COLOR;

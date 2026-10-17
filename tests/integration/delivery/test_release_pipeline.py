@@ -21,17 +21,19 @@ SHA = "a" * 40
 REPOSITORY = "aeizaguerri/wikiGraph"
 
 
+def _step_named(workflow: str, source: str, name: str) -> tuple[int, str]:
+    steps = workflow.split("      - name: ")[1:]
+    for index, block in enumerate(steps):
+        if block.startswith(name + "\n"):
+            return index, block
+    raise AssertionError(f"Missing {source} step: {name}")
+
+
 def test_ci_runs_frontend_and_python_test_levels_in_order_with_browser_diagnostics_scoped() -> None:
     from pathlib import Path
 
     workflow = Path(".github/workflows/ci.yml").read_text()
-    steps = workflow.split("      - name: ")[1:]
-
-    def step_named(name: str) -> tuple[int, str]:
-        for index, block in enumerate(steps):
-            if block.startswith(name + "\n"):
-                return index, block
-        raise AssertionError(f"Missing CI workflow step: {name}")
+    step_named = lambda name: _step_named(workflow, "CI workflow", name)
 
     install_index, _ = step_named("Install frontend dependencies")
     frontend_index, frontend = step_named("Run frontend unit tests")
@@ -72,13 +74,7 @@ def test_release_identity_is_rechecked_after_environment_from_workflow_source() 
     from pathlib import Path
 
     workflow = Path(".github/workflows/deploy.yml").read_text()
-    steps = workflow.split("      - name: ")[1:]
-
-    def step_named(name: str) -> tuple[int, str]:
-        for index, block in enumerate(steps):
-            if block.startswith(name + "\n"):
-                return index, block
-        raise AssertionError(f"Missing workflow step: {name}")
+    step_named = lambda name: _step_named(workflow, "workflow", name)
 
     original_index, original = step_named("Resolve and validate CI run and artifact")
     source_index, source_checkout = step_named("Check out workflow source")
@@ -111,6 +107,39 @@ def test_release_identity_is_rechecked_after_environment_from_workflow_source() 
     assert "run_id: ${{ steps.verify.outputs.run_id }}" in workflow
     assert 'if [[ "$sha" != "${{ needs.preflight.outputs.sha }}" ]]' in recheck
     assert "ref: ${{ needs.preflight.outputs.sha }}" in deploy_checkout
+
+
+@pytest.mark.parametrize(
+    ("command", "environment", "expected_error"),
+    (
+        ("preflight", {"CI_RUN_ID": "bad", "GITHUB_REPOSITORY": "", "GITHUB_TOKEN": "", "GITHUB_REF": "refs/heads/release"}, "CI run ID must contain digits only"),
+        ("select-run", {"CI_RUN_ID": "bad", "GITHUB_REPOSITORY": "", "GITHUB_TOKEN": "", "GITHUB_REF": "refs/heads/release"}, "Repository or read-only GitHub token is missing"),
+        ("preflight", {"CI_RUN_ID": "123", "GITHUB_REPOSITORY": REPOSITORY, "GITHUB_TOKEN": "token", "GITHUB_REF": "refs/heads/release"}, "Manual releases may run only from main"),
+        ("select-run", {"CI_RUN_ID": "", "GITHUB_REPOSITORY": REPOSITORY, "GITHUB_TOKEN": "token", "GITHUB_REF": "refs/heads/release"}, "Manual releases may run only from main"),
+    ),
+)
+def test_main_rejects_release_context_before_outbound_requests(
+    command: str,
+    environment: dict[str, str],
+    expected_error: str,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import scripts.ci_cd as ci_cd
+
+    for name in ("CI_RUN_ID", "GITHUB_REPOSITORY", "GITHUB_TOKEN", "GITHUB_REF"):
+        monkeypatch.delenv(name, raising=False)
+    for name, value in environment.items():
+        monkeypatch.setenv(name, value)
+    requests: list[str] = []
+    monkeypatch.setattr(ci_cd, "_request", lambda url, **kwargs: requests.append(url))
+    monkeypatch.setattr("sys.argv", ["ci_cd.py", command])
+
+    assert ci_cd.main() == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == f"Release stopped safely: {expected_error}\n"
+    assert requests == []
 
 
 def test_select_run_orders_all_bounded_pages_by_created_at(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:

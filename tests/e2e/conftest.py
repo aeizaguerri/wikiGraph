@@ -16,7 +16,6 @@ from wikigraph.app import STATIC_DIR, create_app
 from wikigraph.runs import InMemoryCrawlRunStore
 
 VIEW_ENTRY = STATIC_DIR / "index.html"
-BOOT_TIMEOUT = 10_000
 
 
 def console_errors(bucket: list[str]) -> Callable[[Any], None]:

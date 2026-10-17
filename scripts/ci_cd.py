@@ -9,6 +9,7 @@ import sys
 import time
 from datetime import datetime
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlparse
@@ -30,6 +31,16 @@ FAILED_STATUSES = {
 
 class ReleaseError(RuntimeError):
     """A release precondition or provider response cannot be trusted."""
+
+
+@dataclass(frozen=True)
+class _GitHubContext:
+    repository: str
+    token: str = field(repr=False)
+
+    @property
+    def root(self) -> str:
+        return f"/repos/{self.repository}"
 
 
 def _request(url: str, *, token: str | None = None, method: str = "GET", body: dict[str, Any] | None = None) -> tuple[int, Any]:
@@ -87,17 +98,35 @@ def _github_json(path: str, token: str) -> Any:
     return payload
 
 
-def _release_identity(run_id: str, repository: str, token: str) -> str:
-    root = f"/repos/{repository}"
+def _release_context() -> _GitHubContext:
+    repository = os.environ.get("GITHUB_REPOSITORY", "")
+    token = os.environ.get("GITHUB_TOKEN", "")
+    _require(bool(re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository)) and bool(token), "Repository or read-only GitHub token is missing")
+    _require(os.environ.get("GITHUB_REF") == "refs/heads/main", "Manual releases may run only from main")
+    return _GitHubContext(repository, token)
+
+
+def _artifact_listing(run_id: str, context: _GitHubContext) -> list[Any]:
+    listing = _github_json(f"{context.root}/actions/runs/{run_id}/artifacts", context.token)
+    _require(isinstance(listing, dict) and isinstance(listing.get("artifacts"), list), "GitHub artifact listing is malformed")
+    return listing["artifacts"]
+
+
+def _matching_artifact(artifacts: list[Any], sha: str) -> list[dict[str, Any]]:
+    return [item for item in artifacts if isinstance(item, dict) and item.get("name") == f"frontend-{sha}"]
+
+
+def _release_identity(run_id: str, context: _GitHubContext) -> str:
+    root = context.root
+    repository = context.repository
+    token = context.token
     run = _github_json(f"{root}/actions/runs/{run_id}", token)
     sha = run.get("head_sha", "") if isinstance(run, dict) else ""
     _require(bool(re.fullmatch(r"[0-9a-fA-F]{40}", sha)), "CI run has no valid source SHA")
     comparison = _github_json(f"{root}/compare/{sha}...main", token)
     _require(isinstance(comparison, dict), "GitHub commit comparison is malformed")
     validate_source_run(run, repository, sha, comparison.get("status", ""))
-    artifacts = _github_json(f"{root}/actions/runs/{run_id}/artifacts", token)
-    _require(isinstance(artifacts, dict) and isinstance(artifacts.get("artifacts"), list), "GitHub artifact listing is malformed")
-    matches = [item for item in artifacts["artifacts"] if isinstance(item, dict) and item.get("name") == f"frontend-{sha}"]
+    matches = _matching_artifact(_artifact_listing(run_id, context), sha)
     _require(len(matches) == 1, "CI run must contain exactly one matching frontend artifact")
     validate_artifact(matches[0], sha)
     return sha
@@ -116,29 +145,19 @@ def _run_created_at(run: dict[str, Any]) -> datetime:
     return created_at
 
 
-def _selection_context() -> tuple[str, str, str]:
-    repository = os.environ.get("GITHUB_REPOSITORY", "")
-    token = os.environ.get("GITHUB_TOKEN", "")
-    _require(bool(re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository)) and bool(token), "Repository or read-only GitHub token is missing")
-    _require(os.environ.get("GITHUB_REF") == "refs/heads/main", "Manual releases may run only from main")
-    return repository, token, f"/repos/{repository}"
-
-
 def preflight() -> str:
-    repository = os.environ.get("GITHUB_REPOSITORY", "")
     run_id = validate_run_id(os.environ.get("CI_RUN_ID", ""))
-    token = os.environ.get("GITHUB_TOKEN", "")
-    _require(bool(re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository)) and bool(token), "Repository or read-only GitHub token is missing")
-    _require(os.environ.get("GITHUB_REF") == "refs/heads/main", "Manual releases may run only from main")
-    return _release_identity(run_id, repository, token)
+    context = _release_context()
+    return _release_identity(run_id, context)
 
 
 def select_run() -> tuple[str, str]:
-    repository, token, root = _selection_context()
+    context = _release_context()
+    repository, token, root = context.repository, context.token, context.root
     requested = os.environ.get("CI_RUN_ID", "")
     if requested:
         run_id = validate_run_id(requested)
-        return run_id, _release_identity(run_id, repository, token)
+        return run_id, _release_identity(run_id, context)
 
     page_size = 100
     max_pages = 10
@@ -177,9 +196,7 @@ def select_run() -> tuple[str, str]:
             validate_source_run(run, repository, sha, comparison.get("status", ""))
         except ReleaseError:
             continue
-        artifacts = _github_json(f"{root}/actions/runs/{run_id}/artifacts", token)
-        _require(isinstance(artifacts, dict) and isinstance(artifacts.get("artifacts"), list), "GitHub artifact listing is malformed")
-        matches = [item for item in artifacts["artifacts"] if isinstance(item, dict) and item.get("name") == f"frontend-{sha}"]
+        matches = _matching_artifact(_artifact_listing(str(run_id), context), sha)
         if len(matches) != 1:
             continue
         try:

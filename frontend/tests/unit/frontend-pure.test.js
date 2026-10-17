@@ -2,14 +2,29 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { clampCap } from "../../src/launcher.js";
-import {
+import * as graphStyle from "../../src/graph-style.js";
+
+const {
   COLOR_LENS_VALUES,
   communityColor,
   levelColor,
   nodeSize,
   parseLens,
   wikipediaUrl,
-} from "../../src/graph-style.js";
+} = graphStyle;
+
+test("graph styles expose shared values and helpers, not calculation constants", () => {
+  assert.deepEqual(Object.keys(graphStyle).sort(), [
+    "COLOR_LENS_VALUES",
+    "COMMUNITY_PALETTE",
+    "NEUTRAL_COLOR",
+    "communityColor",
+    "levelColor",
+    "nodeSize",
+    "parseLens",
+    "wikipediaUrl",
+  ]);
+});
 
 test("clampCap uses the launch cap defaults and inclusive limits", () => {
   assert.equal(clampCap("not a number"), 500);
