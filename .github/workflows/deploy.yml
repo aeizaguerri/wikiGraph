@@ -1,0 +1,98 @@
+name: Approved production deployment
+
+on:
+  workflow_dispatch:
+    inputs:
+      ci_run_id:
+        description: Successful CI push-to-main run ID whose tested frontend artifact should be deployed
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    name: Verify release source and protection
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+      deployments: read
+    outputs:
+      sha: ${{ steps.verify.outputs.sha }}
+    steps:
+      - name: Check out workflow source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+      - name: Validate CI run, artifact, and production gate
+        id: verify
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RELEASE_PREFLIGHT_TOKEN: ${{ secrets.RELEASE_PREFLIGHT_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_REF: ${{ github.ref }}
+          CI_RUN_ID: ${{ inputs.ci_run_id }}
+        run: |
+          sha="$(python scripts/ci_cd.py preflight)"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+  deploy:
+    name: Deploy approved production release
+    needs: preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    environment:
+      name: production
+    permissions:
+      actions: read
+      contents: read
+      deployments: read
+    steps:
+      - name: Check out workflow source for post-approval recheck
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+      - name: Recheck production protection after approval
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RELEASE_PREFLIGHT_TOKEN: ${{ secrets.RELEASE_PREFLIGHT_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_REF: ${{ github.ref }}
+          CI_RUN_ID: ${{ inputs.ci_run_id }}
+        run: |
+          sha="$(python scripts/ci_cd.py preflight)"
+          if [[ "$sha" != "${{ needs.preflight.outputs.sha }}" ]]; then
+            echo "Post-approval preflight selected a different source SHA; stopping safely." >&2
+            exit 1
+          fi
+      - name: Check out the validated source commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.preflight.outputs.sha }}
+      - name: Download the exact tested frontend artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-${{ needs.preflight.outputs.sha }}
+          run-id: ${{ inputs.ci_run_id }}
+          github-token: ${{ github.token }}
+          path: src/wikigraph/static
+      - name: Deploy exact source commit to Render and verify readiness
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          RELEASE_SHA: ${{ needs.preflight.outputs.sha }}
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          RENDER_SERVICE_ID: ${{ vars.RENDER_SERVICE_ID }}
+        run: python scripts/ci_cd.py render
+      - name: Deploy tested frontend to Cloudflare Worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: npx --yes wrangler@4.148.0 deploy --config wrangler.jsonc

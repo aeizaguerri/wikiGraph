@@ -30,5 +30,6 @@ credentials.json
 node_modules/
 dist/
 build/
+/test-results/graph-click/
 .wrangler/
 *.log

@@ -14,7 +14,7 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, NoReturn
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
@@ -654,7 +654,7 @@ def _run_poll_interval(store: CrawlRunStore) -> float:
     return max(0.0, getattr(store, "_remote_poll_seconds", 0.05))
 
 
-def _raise_graph_status(state: RunStateSnapshot) -> None:
+def _raise_graph_status(state: RunStateSnapshot) -> NoReturn:
     if state.status is RunStatus.OVERLOAD_WAITING:
         raise _error(
             409,
@@ -680,7 +680,7 @@ def _matching_local_worker(
     store: CrawlRunStore, state: RunStateSnapshot
 ) -> CrawlRunHandle | None:
     lookup = getattr(store, "get_local_worker", None)
-    run = lookup(state.id) if lookup is not None else None
+    run: CrawlRunHandle | None = lookup(state.id) if lookup is not None else None
     if run is None or getattr(run, "_ownership_lost", False):
         return None
     if isinstance(store, SupabaseCrawlRunStore):

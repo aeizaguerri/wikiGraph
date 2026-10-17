@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import os
+from collections.abc import AsyncIterator
+from pathlib import Path
+from typing import Any
 
 import pytest
 
+from tests.browser_diagnostics import GraphClickDiagnostics
 from tests.conftest import BOOT_TIMEOUT, view_url
 from tests.helpers import collect_events, create_run, fetch_graph
 from wikigraph.runs import OVERLOAD_WAITING_EVENT, RunEvent, RunStatus
@@ -281,8 +286,24 @@ async def test_completed_graph_expands_and_returns_by_button_or_escape(
     )
 
 
+@pytest.fixture
+async def graph_click_diagnostics(
+    browser_page: Any, view_server: Any
+) -> AsyncIterator[GraphClickDiagnostics]:
+    diagnostics = GraphClickDiagnostics(Path("test-results/graph-click"))
+    enabled = (
+        os.environ.get("WIKIGRAPH_GRAPH_CLICK_DIAGNOSTICS") == "1"
+        and view_server.base_url.host == "127.0.0.1"
+    )
+    await diagnostics.start(browser_page, enabled=enabled)
+    try:
+        yield diagnostics
+    finally:
+        await diagnostics.finish(browser_page, diagnostics.evidence)
+
+
 async def test_expanded_graph_keeps_close_clickable_and_traps_keyboard_focus(
-    stub, view_server, browser_page
+    stub, view_server, browser_page, graph_click_diagnostics
 ):
     stub.add_page("Focus graph", links=[(0, "Selected article")])
     stub.add_page("Selected article")
@@ -293,12 +314,20 @@ async def test_expanded_graph_keeps_close_clickable_and_traps_keyboard_focus(
         "() => window.__wikigraph && window.__wikigraph.graph.hasNode('Selected article')",
         timeout=BOOT_TIMEOUT,
     )
-    await browser_page.evaluate("""() => {
-      const attrs = window.__wikigraph.graph.getNodeAttributes('Selected article');
-      const point = window.__wikigraph.sigma.graphToViewport({x: attrs.x, y: attrs.y});
-      const rect = document.getElementById('graph').getBoundingClientRect();
-      window.__testNodePoint = {x: rect.left + point.x, y: rect.top + point.y};
-    }""")
+    click_state = await browser_page.evaluate("""() => {
+          const attrs = window.__wikigraph.graph.getNodeAttributes('Selected article');
+          const projected = window.__wikigraph.sigma.graphToViewport({x: attrs.x, y: attrs.y});
+          const rect = document.getElementById('graph').getBoundingClientRect();
+          const point = {x: rect.left + projected.x, y: rect.top + projected.y};
+          window.__testNodePoint = point;
+          return {
+            point, projected, graphRect: {x: rect.x, y: rect.y, width: rect.width, height: rect.height},
+            node: {x: attrs.x, y: attrs.y, size: attrs.size, label: attrs.label, color: attrs.color},
+            selected: window.__wikigraph.getSelected(), cardTitle: document.getElementById('card-title').textContent,
+            viewport: {width: innerWidth, height: innerHeight}
+          };
+        }""")
+    graph_click_diagnostics.evidence["click"] = click_state
     point = await browser_page.evaluate("() => window.__testNodePoint")
     await browser_page.mouse.click(point["x"], point["y"])
     await browser_page.wait_for_function(
