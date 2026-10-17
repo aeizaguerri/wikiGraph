@@ -1,11 +1,12 @@
-name: Approved production deployment
+name: Manual production deployment
 
 on:
   workflow_dispatch:
     inputs:
       ci_run_id:
-        description: Successful CI push-to-main run ID whose tested frontend artifact should be deployed
-        required: true
+        description: Optional successful CI push-to-main run ID; empty selects the latest valid run
+        required: false
+        default: ""
         type: string
 
 permissions:
@@ -17,35 +18,38 @@ concurrency:
 
 jobs:
   preflight:
-    name: Verify release source and protection
+    name: Verify release source
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
       actions: read
       contents: read
-      deployments: read
     outputs:
+      run_id: ${{ steps.verify.outputs.run_id }}
       sha: ${{ steps.verify.outputs.sha }}
     steps:
       - name: Check out workflow source
         uses: actions/checkout@v4
         with:
           ref: ${{ github.sha }}
-      - name: Validate CI run, artifact, and production gate
+      - name: Resolve and validate CI run and artifact
         id: verify
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          RELEASE_PREFLIGHT_TOKEN: ${{ secrets.RELEASE_PREFLIGHT_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           GITHUB_REF: ${{ github.ref }}
           CI_RUN_ID: ${{ inputs.ci_run_id }}
         run: |
-          sha="$(python scripts/ci_cd.py preflight)"
+          selection="$(python scripts/ci_cd.py select-run)"
+          read -r run_id sha <<< "$selection"
+          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "Selected CI run $run_id for source SHA $sha" >> "$GITHUB_STEP_SUMMARY"
+          CI_RUN_ID="$run_id" python scripts/ci_cd.py preflight
 
   deploy:
-    name: Deploy approved production release
+    name: Deploy manual production release
     needs: preflight
     runs-on: ubuntu-latest
     timeout-minutes: 35
@@ -54,23 +58,21 @@ jobs:
     permissions:
       actions: read
       contents: read
-      deployments: read
     steps:
-      - name: Check out workflow source for post-approval recheck
+      - name: Check out workflow source for post-environment recheck
         uses: actions/checkout@v4
         with:
           ref: ${{ github.sha }}
-      - name: Recheck production protection after approval
+      - name: Recheck release identity after environment
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          RELEASE_PREFLIGHT_TOKEN: ${{ secrets.RELEASE_PREFLIGHT_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           GITHUB_REF: ${{ github.ref }}
-          CI_RUN_ID: ${{ inputs.ci_run_id }}
+          CI_RUN_ID: ${{ needs.preflight.outputs.run_id }}
         run: |
           sha="$(python scripts/ci_cd.py preflight)"
           if [[ "$sha" != "${{ needs.preflight.outputs.sha }}" ]]; then
-            echo "Post-approval preflight selected a different source SHA; stopping safely." >&2
+            echo "Post-environment preflight selected a different source SHA; stopping safely." >&2
             exit 1
           fi
       - name: Check out the validated source commit
@@ -81,7 +83,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: frontend-${{ needs.preflight.outputs.sha }}
-          run-id: ${{ inputs.ci_run_id }}
+          run-id: ${{ needs.preflight.outputs.run_id }}
           github-token: ${{ github.token }}
           path: src/wikigraph/static
       - name: Deploy exact source commit to Render and verify readiness

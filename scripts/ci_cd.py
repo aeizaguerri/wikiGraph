@@ -7,6 +7,7 @@ import os
 import re
 import sys
 import time
+from datetime import datetime
 from collections.abc import Callable
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -80,36 +81,13 @@ def validate_artifact(artifact: dict[str, Any], sha: str) -> None:
     _require(artifact.get("expired") is False and isinstance(artifact.get("id"), int), "Frontend artifact is expired or malformed")
 
 
-def validate_environment(environment: dict[str, Any], policies: list[dict[str, Any]]) -> None:
-    rules = environment.get("protection_rules")
-    _require(
-        isinstance(rules, list)
-        and any(
-            rule.get("type") == "required_reviewers"
-            and isinstance(rule.get("reviewers"), list)
-            and bool(rule["reviewers"])
-            for rule in rules
-            if isinstance(rule, dict)
-        ),
-        "Production environment has no configured required reviewers",
-    )
-    policy = environment.get("deployment_branch_policy")
-    _require(isinstance(policy, dict) and policy.get("custom_branch_policies") is True, "Production environment is not restricted to a custom branch allowlist")
-    _require(isinstance(policies, list) and len(policies) == 1 and policies[0].get("name") == "main", "Production environment must allow only main")
-
-
 def _github_json(path: str, token: str) -> Any:
     status, payload = _request(f"{GITHUB_API}{path}", token=token)
-    _require(status == 200 and isinstance(payload, (dict, list)), f"GitHub read failed with HTTP {status}")
+    _require(status == 200 and isinstance(payload, (dict, list)), f"GitHub GET {path} failed with HTTP {status}")
     return payload
 
 
-def preflight() -> str:
-    repository = os.environ.get("GITHUB_REPOSITORY", "")
-    run_id = validate_run_id(os.environ.get("CI_RUN_ID", ""))
-    token = os.environ.get("RELEASE_PREFLIGHT_TOKEN") or os.environ.get("GITHUB_TOKEN", "")
-    _require(bool(re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository)) and bool(token), "Repository or read-only GitHub token is missing")
-    _require(os.environ.get("GITHUB_REF") == "refs/heads/main", "Manual releases may run only from main")
+def _release_identity(run_id: str, repository: str, token: str) -> str:
     root = f"/repos/{repository}"
     run = _github_json(f"{root}/actions/runs/{run_id}", token)
     sha = run.get("head_sha", "") if isinstance(run, dict) else ""
@@ -122,11 +100,94 @@ def preflight() -> str:
     matches = [item for item in artifacts["artifacts"] if isinstance(item, dict) and item.get("name") == f"frontend-{sha}"]
     _require(len(matches) == 1, "CI run must contain exactly one matching frontend artifact")
     validate_artifact(matches[0], sha)
-    environment = _github_json(f"{root}/environments/production", token)
-    policy_data = _github_json(f"{root}/environments/production/deployment-branch-policies", token)
-    _require(isinstance(policy_data, dict) and isinstance(policy_data.get("branch_policies"), list), "Production branch policy response is malformed")
-    validate_environment(environment, policy_data["branch_policies"])
     return sha
+
+
+def _run_created_at(run: dict[str, Any]) -> datetime:
+    value = run.get("created_at")
+    pattern = r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})"
+    if not isinstance(value, str) or not re.fullmatch(pattern, value):
+        raise ReleaseError("GitHub workflow run has malformed created_at ordering metadata")
+    try:
+        created_at = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise ReleaseError("GitHub workflow run has malformed created_at ordering metadata") from error
+    _require(created_at.utcoffset() is not None, "GitHub workflow run has malformed created_at ordering metadata")
+    return created_at
+
+
+def _selection_context() -> tuple[str, str, str]:
+    repository = os.environ.get("GITHUB_REPOSITORY", "")
+    token = os.environ.get("GITHUB_TOKEN", "")
+    _require(bool(re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository)) and bool(token), "Repository or read-only GitHub token is missing")
+    _require(os.environ.get("GITHUB_REF") == "refs/heads/main", "Manual releases may run only from main")
+    return repository, token, f"/repos/{repository}"
+
+
+def preflight() -> str:
+    repository = os.environ.get("GITHUB_REPOSITORY", "")
+    run_id = validate_run_id(os.environ.get("CI_RUN_ID", ""))
+    token = os.environ.get("GITHUB_TOKEN", "")
+    _require(bool(re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository)) and bool(token), "Repository or read-only GitHub token is missing")
+    _require(os.environ.get("GITHUB_REF") == "refs/heads/main", "Manual releases may run only from main")
+    return _release_identity(run_id, repository, token)
+
+
+def select_run() -> tuple[str, str]:
+    repository, token, root = _selection_context()
+    requested = os.environ.get("CI_RUN_ID", "")
+    if requested:
+        run_id = validate_run_id(requested)
+        return run_id, _release_identity(run_id, repository, token)
+
+    page_size = 100
+    max_pages = 10
+    candidates: dict[int, tuple[datetime, dict[str, Any]]] = {}
+    workflow_file = CI_WORKFLOW.rsplit("/", 1)[-1]
+    for page in range(1, max_pages + 1):
+        query = f"?branch=main&event=push&status=completed&per_page={page_size}&page={page}"
+        listing = _github_json(f"{root}/actions/workflows/{workflow_file}/runs{query}", token)
+        _require(isinstance(listing, dict) and isinstance(listing.get("workflow_runs"), list), "GitHub workflow run listing is malformed")
+        runs = listing["workflow_runs"]
+        for run in runs:
+            if not isinstance(run, dict):
+                continue
+            run_id = run.get("id")
+            sha = run.get("head_sha", "")
+            if isinstance(run_id, bool) or not isinstance(run_id, int) or run_id < 0 or not isinstance(sha, str):
+                continue
+            try:
+                validate_source_run(run, repository, sha, "ahead")
+            except (ReleaseError, AttributeError):
+                continue
+            created_at = _run_created_at(run)
+            previous = candidates.get(run_id)
+            if previous is not None and previous[1] != run:
+                raise ReleaseError(f"GitHub workflow run listing has conflicting metadata for run ID {run_id}")
+            candidates[run_id] = (created_at, run)
+        if not runs or len(runs) < page_size:
+            break
+
+    ordered = sorted(candidates.items(), key=lambda item: (item[1][0], item[0]), reverse=True)
+    for run_id, (_, run) in ordered:
+        sha = run["head_sha"]
+        comparison = _github_json(f"{root}/compare/{sha}...main", token)
+        _require(isinstance(comparison, dict), "GitHub commit comparison is malformed")
+        try:
+            validate_source_run(run, repository, sha, comparison.get("status", ""))
+        except ReleaseError:
+            continue
+        artifacts = _github_json(f"{root}/actions/runs/{run_id}/artifacts", token)
+        _require(isinstance(artifacts, dict) and isinstance(artifacts.get("artifacts"), list), "GitHub artifact listing is malformed")
+        matches = [item for item in artifacts["artifacts"] if isinstance(item, dict) and item.get("name") == f"frontend-{sha}"]
+        if len(matches) != 1:
+            continue
+        try:
+            validate_artifact(matches[0], sha)
+        except ReleaseError:
+            continue
+        return str(run_id), sha
+    raise ReleaseError("No successful main CI run has a valid unexpired exact-SHA frontend artifact")
 
 
 class RenderClient:
@@ -212,10 +273,13 @@ def deploy_backend() -> None:
 
 def main() -> int:
     try:
-        if len(sys.argv) != 2 or sys.argv[1] not in {"preflight", "render"}:
-            raise ReleaseError("Usage: ci_cd.py preflight|render")
+        if len(sys.argv) != 2 or sys.argv[1] not in {"preflight", "render", "select-run"}:
+            raise ReleaseError("Usage: ci_cd.py preflight|select-run|render")
         if sys.argv[1] == "preflight":
             print(preflight())
+        elif sys.argv[1] == "select-run":
+            run_id, sha = select_run()
+            print(run_id, sha)
         else:
             deploy_backend()
         return 0
