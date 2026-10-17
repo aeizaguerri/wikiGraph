@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
@@ -373,13 +373,13 @@ class FakeRender:
     service: dict[str, Any]
     post_response: tuple[int, dict[str, Any]]
     get_responses: list[tuple[int, dict[str, Any]]]
-    posts: int = 0
+    deploy_requests: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
 
     def get_service(self, service_id: str) -> dict[str, Any]:
         return self.service
 
     def post_deploy(self, service_id: str, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
-        self.posts += 1
+        self.deploy_requests.append((service_id, payload.copy()))
         return self.post_response
 
     def get_deploy(self, service_id: str, deploy_id: str) -> tuple[int, dict[str, Any]]:
@@ -392,25 +392,46 @@ def render_api(**overrides: Any) -> FakeRender:
     return FakeRender(service, (201, {"id": "dep-1", "commit": {"id": SHA}, "status": "created"}), [(200, {"id": "dep-1", "commit": {"id": SHA}, "status": "live"})])
 
 
-def test_render_deploy_posts_exact_sha_once_and_rejects_bad_service_or_uncertain_response() -> None:
+def test_render_deploy_posts_exact_sha_without_clearing_cache() -> None:
     api = render_api()
-    deploy_id = deploy_render(api, "svc", SHA, REPOSITORY, "main")
-    assert deploy_id == "dep-1"
-    assert api.posts == 1
-    for bad_service in (
-        render_api(repo="https://github.com/other/repo"),
-        render_api(branch="release"),
-        render_api(autoDeploy="yes"),
-    ):
-        with pytest.raises(ReleaseError):
-            deploy_render(bad_service, "svc", SHA, REPOSITORY, "main")
-        assert bad_service.posts == 0
-    for response in ((202, {"status": "queued"}), (201, {"id": "dep-2", "commit": {"id": "b" * 40}, "status": "created"}), (500, {})):
-        uncertain = render_api()
-        uncertain.post_response = response
-        with pytest.raises(ReleaseError):
-            deploy_render(uncertain, "svc", SHA, REPOSITORY, "main")
-        assert uncertain.posts == 1
+
+    assert deploy_render(api, "svc", SHA, REPOSITORY, "main") == "dep-1"
+    assert api.deploy_requests == [("svc", {"commitId": SHA, "clearCache": "do_not_clear"})]
+
+
+@pytest.mark.parametrize(
+    "service_overrides",
+    [
+        {"repo": "https://github.com/other/repo"},
+        {"branch": "release"},
+        {"autoDeploy": "yes"},
+    ],
+    ids=["wrong-repository", "wrong-branch", "automatic-deploys-enabled"],
+)
+def test_render_rejects_untrusted_service_without_creating_a_deploy(service_overrides: dict[str, Any]) -> None:
+    api = render_api(**service_overrides)
+
+    with pytest.raises(ReleaseError):
+        deploy_render(api, "svc", SHA, REPOSITORY, "main")
+    assert api.deploy_requests == []
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        (202, {"status": "queued"}),
+        (201, {"id": "dep-2", "commit": {"id": "b" * 40}, "status": "created"}),
+        (500, {}),
+    ],
+    ids=["unconfirmed-identity", "wrong-commit", "server-error"],
+)
+def test_render_does_not_retry_an_uncertain_deploy_creation(response: tuple[int, dict[str, Any]]) -> None:
+    api = render_api()
+    api.post_response = response
+
+    with pytest.raises(ReleaseError):
+        deploy_render(api, "svc", SHA, REPOSITORY, "main")
+    assert api.deploy_requests == [("svc", {"commitId": SHA, "clearCache": "do_not_clear"})]
 
 
 def test_render_polling_requires_exact_commit_and_live_or_known_status() -> None:
