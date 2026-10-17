@@ -290,7 +290,7 @@ async def test_expanded_graph_keeps_close_clickable_and_traps_keyboard_focus(
     await browser_page.set_viewport_size({"width": 1280, "height": 800})
     await browser_page.goto(view_url(view_server, run_id))
     await browser_page.wait_for_function(
-        "() => window.__wikigraph && window.__wikigraph.graph.hasNode('Selected article')",
+        "() => window.__wikigraph?.getState() === 'static' && window.__wikigraph.graph.hasNode('Selected article')",
         timeout=BOOT_TIMEOUT,
     )
     await browser_page.evaluate("""() => {
