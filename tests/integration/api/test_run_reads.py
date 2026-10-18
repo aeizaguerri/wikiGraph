@@ -133,7 +133,9 @@ async def test_http_reads_keep_unknown_and_expired_contracts_without_cleanup() -
         run_id = json.loads(request.content)["p_run_id"]
         if run_id == "unknown":
             return httpx.Response(200, json=[])
-        return httpx.Response(200, json=[snapshot_row(status="expired", graph={"secret": "hidden"}, checkpoint={"secret": "hidden"})])
+        expired = snapshot_row(status="expired", graph={"secret": "hidden"}, checkpoint={"secret": "hidden"})
+        expired["progress"] = None
+        return httpx.Response(200, json=[expired])
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as db:
         store = SupabaseCrawlRunStore("https://db.example", "test-key", async_client=db)
@@ -145,7 +147,12 @@ async def test_http_reads_keep_unknown_and_expired_contracts_without_cleanup() -
                 assert unknown.status_code == 404
                 assert unknown.json()["error"]["code"] == "unknown_run"
                 assert expired.status_code == 410
-                assert expired.json()["error"]["code"] == "run_expired"
+                assert expired.json() == {
+                    "error": {
+                        "code": "run_expired",
+                        "message": "This crawl run has expired and its detailed state was removed.",
+                    }
+                }
     assert [json.loads(request.content)["p_view"] for request in requests] == [
         "state", "state", "preview", "preview", "state", "state"
     ]
@@ -174,6 +181,29 @@ async def test_graph_wait_polls_state_then_reads_completed_graph_once() -> None:
     assert response.status_code == 200
     assert [json.loads(request.content)["p_view"] for request in requests] == ["state", "state", "graph"]
     assert len(requests) == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("suffix", ["", "/preview", "/graph"])
+async def test_active_run_with_null_progress_remains_redacted_as_503(suffix: str) -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        row = snapshot_row(status="running")
+        row["progress"] = None
+        return httpx.Response(200, json=[row])
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as db:
+        store = SupabaseCrawlRunStore("https://db.example", "test-key", async_client=db)
+        app = create_app(run_store=store)
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.get(f"/api/runs/http-run{suffix}")
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "error": {
+            "code": "persistence_unavailable",
+            "message": "Crawl persistence is unavailable. Try again later.",
+        }
+    }
 
 
 @pytest.mark.asyncio

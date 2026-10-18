@@ -251,9 +251,11 @@ async def test_unknown_and_expired_reads_preserve_empty_and_payload_suppression(
     async def handler(request: httpx.Request) -> httpx.Response:
         if json.loads(request.content)["p_run_id"] == "unknown":
             return httpx.Response(200, json=[])
-        return httpx.Response(200, json=[_row(
+        expired = _row(
             status="expired", checkpoint={"secret": "checkpoint"}, graph={"secret": "graph"}
-        )])
+        )
+        expired["progress"] = None
+        return httpx.Response(200, json=[expired])
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         store = SupabaseCrawlRunStore("https://db.example", "key", async_client=client)
