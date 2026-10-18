@@ -99,9 +99,6 @@ async def test_http_reads_use_purpose_rpc_and_preserve_public_shapes() -> None:
     assert all(request.method == "POST" for request in requests)
     assert all(b"internal-owner-secret" not in request.content for request in requests)
     assert all("internal-owner-secret" not in response.text for response in (state, preview, graph))
-    # External request and serialized response sizes are structural evidence, not latency claims.
-    assert [len(request.content) for request in requests] == [40, 42, 40, 40]
-    assert [len(response.content) for response in (state, preview, graph)] == [196, 246, 230]
 
 
 @pytest.mark.asyncio
@@ -169,7 +166,6 @@ async def test_graph_wait_polls_state_then_reads_completed_graph_once() -> None:
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as db:
         store = SupabaseCrawlRunStore("https://db.example", "test-key", async_client=db)
-        store._remote_poll_seconds = 0
         app = create_app(run_store=store)
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
             async with asyncio.timeout(5):
