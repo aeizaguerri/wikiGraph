@@ -79,16 +79,16 @@ Python API and module integration tests use local deterministic fakes/stubs for 
 uv run pytest tests/integration
 ```
 
-The PostgreSQL/PostgREST role smoke can be run against a fresh owned local harness:
+All real PostgreSQL/PostgREST contracts use the same fresh owned local harness:
 
 ```sh
 .venv/bin/python scripts/test_postgres.py -- \
-  .venv/bin/python -m pytest -q tests/integration/persistence/postgres/test_runtime_roles.py
+  .venv/bin/python -m pytest -q tests/integration/persistence/postgres
 ```
 
-`scripts/test_postgres.py` uses the already-pinned PostgreSQL 16 Alpine and PostgREST v12.2.3 images, binds the dynamically allocated PostgREST port only to loopback, applies the checked-in migrations to a fresh database, and injects role-shaped service, anon, and authenticated JWTs into the explicit child command. It refuses an implicit/missing child command, does not interpolate through a shell, removes inherited `WIKIGRAPH_*`, `SUPABASE_*`, and database connection variables from that child, and cleans only resources named for its fresh run. State is confined to `odd/test-postgres/<run-id>`. Do not pass production credentials or point the harness at an external database; it does not accept an external database URL. Podman must be available and the two exact images must already be available locally; the runner does not pull images or upgrade versions. The administrative PostgreSQL connection is used only while provisioning the owned database; app role JWTs are separately signed as `service_role`, `anon`, and `authenticated`.
+`scripts/test_postgres.py` uses pinned PostgreSQL 16 Alpine and PostgREST v12.2.3 images, binds the dynamically allocated PostgREST port only to loopback, applies checked-in migrations to a fresh database, and injects service, anon, and authenticated role JWTs into the explicit child command. It refuses a missing child command, does not interpolate through a shell, removes inherited `WIKIGRAPH_*`, `SUPABASE_*`, and database connection variables from the child, and cleans only resources named for its fresh run. State is confined to `odd/test-postgres/<run-id>`. Do not pass production credentials or point the harness at an external database; it accepts no external database URL. Podman and the exact images must already be available locally; the runner does not pull images or upgrade versions. Privileged admin SQL is limited to fixture clock/lock/data setup and cleanup through the validated owned-container receipt. Role-boundary tests and application/store calls use their ordinary service, anon, or authenticated JWTs, never the admin connection. The former ticket-specific harness scripts are retired and must not be used; they can target fixed container names and may destroy resources outside this owned run.
 
-The rest of `tests/integration/persistence/postgres` remains explicitly optional and uses its existing test-specific configuration/credential guards. Ordinary pytest without the owned runner skips the runtime-role smoke; invoking the runner requires its child command, and the migrated role tests validate the runner's run receipt and loopback URL before use. A skipped credential-gated check is not a database pass. This runner and role smoke do not imply that all 77 previously skipped database cases ran; the remaining database-check adaptation is separate work.
+Ordinary pytest without the owned harness explicitly skips the database contracts. When invoked through the harness, the selected contracts run against its owned loopback PostgREST instance; a missing-configuration skip is not accepted as a database pass. Offline unit/API/simulated passes and collection do not prove any real SQL behavior. The full owned-database command above remains the runtime proof for constraints, RPCs, transaction/locking, role isolation, cross-client/process durability, expiry, and cleanup.
 
 Browser E2E requires the frontend build and Chromium:
 

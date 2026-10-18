@@ -10,10 +10,13 @@ import uuid
 import httpx
 import pytest
 
-URL = os.environ.get("WIKIGRAPH_TICKET28_POSTGREST_URL")
-JWT = os.environ.get("WIKIGRAPH_TICKET28_SERVICE_ROLE_JWT")
+from tests.support.postgres import load_postgres_harness, run_postgres_admin_sql
+
+HARNESS = load_postgres_harness()
+URL = HARNESS.url if HARNESS else None
+JWT = HARNESS.service_role_jwt if HARNESS else None
 pytestmark = pytest.mark.skipif(
-    URL != "http://127.0.0.1:33028" or not JWT,
+    not URL or not JWT,
     reason="ticket28 disposable loopback PostgREST credentials are required",
 )
 
@@ -24,13 +27,7 @@ def _headers() -> dict[str, str]:
 
 
 def _sql(query: str) -> str:
-    result = subprocess.run(
-        [
-            "podman", "exec", "-i", "ticket28-postgres", "psql", "-X", "-A", "-t",
-            "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "wikigraph",
-        ], input=query, text=True, capture_output=True, check=True,
-    )
-    return result.stdout.strip()
+    return run_postgres_admin_sql(query).stdout.strip()
 
 
 def _rpc(name: str, args: dict[str, object], *, headers: dict[str, str] | None = None) -> httpx.Response:

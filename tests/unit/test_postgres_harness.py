@@ -9,7 +9,12 @@ from pathlib import Path
 
 import pytest
 
-from tests.support.postgres import load_postgres_harness
+from tests.support.postgres import (
+    PostgresHarness,
+    load_postgres_harness,
+    run_postgres_admin_sql,
+    start_postgres_admin_sql,
+)
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -247,6 +252,50 @@ def owned_postgres_context(monkeypatch: pytest.MonkeyPatch) -> tuple[str, Path, 
         if owner_path.exists():
             owner_path.unlink()
         state_dir.rmdir()
+
+
+def test_admin_sql_refuses_to_run_without_owned_harness(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("WIKIGRAPH_POSTGRES_HARNESS_RUN_ID", raising=False)
+
+    with pytest.raises(RuntimeError, match="requires the owned PostgreSQL harness"):
+        run_postgres_admin_sql("select 1")
+
+    with pytest.raises(RuntimeError, match="requires the owned PostgreSQL harness"):
+        start_postgres_admin_sql("select 1")
+
+
+def test_admin_sql_targets_only_container_from_validated_owned_receipt(
+    monkeypatch: pytest.MonkeyPatch,
+    owned_postgres_context: tuple[str, Path, bytes],
+) -> None:
+    run_id, _, _ = owned_postgres_context
+    observed: dict[str, object] = {}
+
+    def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        observed.update(command=command, kwargs=kwargs)
+        return subprocess.CompletedProcess(command, 0, "result\\n", "")
+
+    monkeypatch.setattr("tests.support.postgres.subprocess.run", fake_run)
+
+    result = run_postgres_admin_sql("select 1")
+
+    assert result.stdout == "result\\n"
+    assert observed["command"] == [
+        "podman", "exec", "-i", f"wikigraph-test-{run_id}-postgres",
+        "psql", "-X", "-A", "-t", "-q", "-v", "ON_ERROR_STOP=1",
+        "-U", "postgres", "-d", "wikigraph",
+    ]
+    assert observed["kwargs"]["input"] == "select 1"
+    assert observed["kwargs"]["check"] is True
+
+
+def test_harness_credentials_are_not_in_repr() -> None:
+    config = PostgresHarness(
+        "http://127.0.0.1:54321", "service-secret", "anon-secret",
+        "authenticated-secret", "a" * 32, ROOT / "odd" / "test-postgres",
+    )
+
+    assert "secret" not in repr(config)
 
 
 def test_missing_harness_context_is_optional(monkeypatch: pytest.MonkeyPatch) -> None:

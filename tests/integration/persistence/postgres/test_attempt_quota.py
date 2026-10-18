@@ -13,24 +13,21 @@ import pytest
 
 from wikigraph.governor import RunAttemptQuotaExceeded, SupabaseWikimediaAdmission
 
-URL = os.environ.get("WIKIGRAPH_TICKET28_POSTGREST_URL")
-JWT = os.environ.get("WIKIGRAPH_TICKET28_SERVICE_ROLE_JWT")
+from tests.support.postgres import load_postgres_harness, run_postgres_admin_sql
+
+HARNESS = load_postgres_harness()
+URL = HARNESS.url if HARNESS else None
+JWT = HARNESS.service_role_jwt if HARNESS else None
 _active_requests: dict[str, str] | None = None
 _active_grants: set[str] | None = None
 pytestmark = pytest.mark.skipif(
-    URL != "http://127.0.0.1:33028" or not JWT,
+    not URL or not JWT,
     reason="ticket28 disposable loopback PostgREST credentials are required",
 )
 
 
 def _sql(query: str) -> str:
-    result = subprocess.run(
-        [
-            "podman", "exec", "-i", "ticket28-postgres", "psql", "-X", "-A", "-t",
-            "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "wikigraph",
-        ], input=query, text=True, capture_output=True, check=True,
-    )
-    return result.stdout.strip()
+    return run_postgres_admin_sql(query).stdout.strip()
 
 
 @pytest.fixture(autouse=True)
@@ -40,11 +37,11 @@ async def drain_test_admissions() -> AsyncIterator[None]:
     requests: dict[str, str] = {}
     grants: set[str] = set()
     _active_requests, _active_grants = requests, grants
-    cooldown = _sql("select coalesce(cooldown_until::text, '') from public.wikimedia_governor_state where singleton") if URL == "http://127.0.0.1:33028" and JWT else ""
+    cooldown = _sql("select coalesce(cooldown_until::text, '') from public.wikimedia_governor_state where singleton") if URL and JWT else ""
     try:
         yield
     finally:
-        if URL == "http://127.0.0.1:33028" and JWT:
+        if URL and JWT:
             async with httpx.AsyncClient(timeout=20) as client:
                 # Restore the test's shared cooldown state before draining requests.
                 cooldown_value = f"'{cooldown}'::timestamptz" if cooldown else "null"

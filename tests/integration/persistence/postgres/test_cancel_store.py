@@ -16,10 +16,13 @@ from wikigraph.response_cache import InMemoryResponseCache
 from wikigraph.runs import RunStatus, SupabaseCrawlRunStore
 from tests.support.mediawiki import FakeMediaWiki
 
-URL = os.environ.get("WIKIGRAPH_TICKET28_POSTGREST_URL")
-KEY = os.environ.get("WIKIGRAPH_TICKET28_SERVICE_ROLE_JWT")
+from tests.support.postgres import load_postgres_harness
+
+HARNESS = load_postgres_harness()
+URL = HARNESS.url if HARNESS else None
+KEY = HARNESS.service_role_jwt if HARNESS else None
 pytestmark = pytest.mark.skipif(
-    URL != "http://127.0.0.1:33028" or not KEY,
+    not URL or not KEY,
     reason="ticket28 disposable loopback PostgREST credentials are required",
 )
 
@@ -77,7 +80,7 @@ async def test_cancel_stops_worker_and_same_id_retry_uses_durable_state() -> Non
     stub.add_page(seed, links=[(0, leaf)])
     stub.add_page(leaf)
     gate = stub.gate(leaf)
-    request = CrawlRequest(seed=seed, language="en", depth=2, node_cap=10)
+    request = CrawlRequest(seed=seed, language="en", depth=2, node_cap=19)
     run = store.start_run(request, stub.transport)
     try:
         await _eventually(
@@ -87,6 +90,13 @@ async def test_cancel_stops_worker_and_same_id_retry_uses_durable_state() -> Non
         )
         await _eventually(lambda: len(stub.requests), lambda count: count >= 3)
         before = await asyncio.to_thread(_row, run.id)
+        snapshot = await store.get_state(run.id)
+        assert snapshot is not None
+        assert snapshot.id == run.id
+        assert snapshot.request == CrawlRequest(seed=seed, language="en", depth=2, node_cap=19)
+        assert snapshot.status is RunStatus.RUNNING
+        assert isinstance(before["owner_token"], str) and before["owner_token"]
+        assert snapshot.owner_token == before["owner_token"]
         checkpoint = before["checkpoint"]
         attempts_used = before["attempts_used"]
         assert attempts_used > 0

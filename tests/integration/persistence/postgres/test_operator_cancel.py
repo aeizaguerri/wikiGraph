@@ -18,10 +18,13 @@ from wikigraph.governor import GlobalWikimediaGovernor, SupabaseWikimediaAdmissi
 from wikigraph.response_cache import InMemoryResponseCache
 from wikigraph.runs import SupabaseCrawlRunStore
 
-URL = os.environ.get("WIKIGRAPH_TICKET28_POSTGREST_URL")
-KEY = os.environ.get("WIKIGRAPH_TICKET28_SERVICE_ROLE_JWT")
+from tests.support.postgres import load_postgres_harness
+
+HARNESS = load_postgres_harness()
+URL = HARNESS.url if HARNESS else None
+KEY = HARNESS.service_role_jwt if HARNESS else None
 pytestmark = pytest.mark.skipif(
-    URL != "http://127.0.0.1:33028" or not KEY,
+    not URL or not KEY,
     reason="ticket28 disposable loopback PostgREST credentials are required",
 )
 

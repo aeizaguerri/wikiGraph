@@ -25,9 +25,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
 from wikigraph.app import create_app
 from wikigraph.runs import PersistenceError, SupabaseCrawlRunStore
 
-URL = os.environ.get("WIKIGRAPH_TICKET28_POSTGREST_URL")
-KEY = os.environ.get("WIKIGRAPH_TICKET28_SERVICE_ROLE_JWT")
-pytestmark = pytest.mark.skipif(not URL or not KEY, reason="local PostgREST harness is not configured")
+from tests.support.postgres import load_postgres_harness, run_postgres_admin_sql
+
+HARNESS = load_postgres_harness()
+URL = HARNESS.url if HARNESS else None
+KEY = HARNESS.service_role_jwt if HARNESS else None
+pytestmark = pytest.mark.skipif(not URL or not KEY, reason="owned PostgreSQL harness is not configured")
 
 
 def _headers() -> dict[str, str]:
@@ -55,12 +58,7 @@ def _row(run_id: str) -> dict[str, object]:
 
 
 def _sql(query: str) -> str:
-    result = subprocess.run(
-        ["podman", "exec", "-i", "ticket28-postgres", "psql", "-X", "-A", "-t",
-         "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "wikigraph"],
-        input=query, text=True, capture_output=True, check=True, timeout=15,
-    )
-    return result.stdout.strip()
+    return run_postgres_admin_sql(query, timeout=15).stdout.strip()
 
 
 async def _eventually(read, predicate, *, timeout: float = 12) -> object:

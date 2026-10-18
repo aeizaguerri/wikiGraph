@@ -1,8 +1,8 @@
 """Ticket 21 acceptance against the real migrated PostgREST schema.
 
-Run with the disposable harness from ``scripts/ticket21-postgrest.sh`` and:
-WIKIGRAPH_TICKET21_POSTGREST_URL=http://127.0.0.1:33002 \
-WIKIGRAPH_TICKET21_POSTGREST_KEY=<ephemeral-local-jwt> \
+Run with the disposable harness from ``scripts/test_postgres.py`` and:
+owned local harness URL \
+owned service-role JWT \
 uv run pytest tests/integration/persistence/postgres/test_checkpoints.py -q
 """
 
@@ -21,11 +21,14 @@ from wikigraph.governor import GlobalWikimediaGovernor
 from wikigraph.runs import SupabaseCrawlRunStore
 
 
-POSTGREST_URL = os.environ.get("WIKIGRAPH_TICKET21_POSTGREST_URL")
-POSTGREST_KEY = os.environ.get("WIKIGRAPH_TICKET21_POSTGREST_KEY")
+from tests.support.postgres import load_postgres_harness
+
+HARNESS = load_postgres_harness()
+POSTGREST_URL = HARNESS.url if HARNESS else None
+POSTGREST_KEY = HARNESS.service_role_jwt if HARNESS else None
 pytestmark = pytest.mark.skipif(
     not POSTGREST_URL or not POSTGREST_KEY,
-    reason="ticket21 local PostgREST service is not configured",
+    reason="owned PostgreSQL harness is not configured",
 )
 
 

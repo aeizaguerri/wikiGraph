@@ -5,7 +5,8 @@ from __future__ import annotations
 import json
 import os
 import re
-from dataclasses import dataclass
+import subprocess
+from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -16,9 +17,9 @@ _RUN_ID = re.compile(r"^[0-9a-f]{32}$")
 @dataclass(frozen=True)
 class PostgresHarness:
     url: str
-    service_role_jwt: str
-    anon_jwt: str
-    authenticated_jwt: str
+    service_role_jwt: str = field(repr=False)
+    anon_jwt: str = field(repr=False)
+    authenticated_jwt: str = field(repr=False)
     run_id: str
     state_dir: Path
 
@@ -72,3 +73,47 @@ def load_postgres_harness() -> PostgresHarness | None:
     if not all((service, anon, authenticated)):
         raise RuntimeError("owned PostgreSQL harness role credentials are incomplete")
     return PostgresHarness(url, service, anon, authenticated, run_id, expected_dir)
+
+
+def _owned_admin_command(config: PostgresHarness) -> list[str]:
+    """Address only the PostgreSQL container named by the validated run receipt."""
+    return [
+        "podman", "exec", "-i", f"wikigraph-test-{config.run_id}-postgres",
+        "psql", "-X", "-A", "-t", "-q", "-v", "ON_ERROR_STOP=1",
+        "-U", "postgres", "-d", "wikigraph",
+    ]
+
+
+def _require_owned_harness() -> PostgresHarness:
+    config = load_postgres_harness()
+    if config is None:
+        raise RuntimeError("admin SQL requires the owned PostgreSQL harness")
+    return config
+
+
+def run_postgres_admin_sql(query: str, *, timeout: float = 15) -> subprocess.CompletedProcess[str]:
+    """Execute fixture-only SQL as admin against the currently validated owned DB."""
+    return subprocess.run(
+        _owned_admin_command(_require_owned_harness()),
+        input=query,
+        text=True,
+        capture_output=True,
+        check=True,
+        timeout=timeout,
+    )
+
+
+def start_postgres_admin_sql(query: str) -> subprocess.Popen[str]:
+    """Start a fixture lock/clock operation on the currently owned database."""
+    process = subprocess.Popen(
+        _owned_admin_command(_require_owned_harness()),
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if process.stdin is None:
+        raise RuntimeError("owned PostgreSQL admin SQL input is unavailable")
+    process.stdin.write(query)
+    process.stdin.close()
+    return process

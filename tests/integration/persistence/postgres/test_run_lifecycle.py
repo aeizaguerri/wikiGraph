@@ -1,8 +1,8 @@
-"""Ticket 20 live PostgREST/Postgres acceptance coverage.
+"""Public run lifecycle against the owned PostgREST/Postgres harness.
 
-Run with an isolated local service, for example:
-WIKIGRAPH_TICKET20_POSTGREST_URL=http://127.0.0.1:33000 \
-WIKIGRAPH_TICKET20_POSTGREST_KEY=local-test-key \
+Use scripts/test_postgres.py with an explicit child test command:
+owned local harness URL \
+owned service-role JWT \
 uv run pytest tests/integration/persistence/postgres/test_run_lifecycle.py -q
 """
 
@@ -22,11 +22,14 @@ from wikigraph.governor import GlobalWikimediaGovernor
 from wikigraph.runs import SupabaseCrawlRunStore
 
 
-POSTGREST_URL = os.environ.get("WIKIGRAPH_TICKET20_POSTGREST_URL")
-POSTGREST_KEY = os.environ.get("WIKIGRAPH_TICKET20_POSTGREST_KEY")
+from tests.support.postgres import load_postgres_harness
+
+HARNESS = load_postgres_harness()
+POSTGREST_URL = HARNESS.url if HARNESS else None
+POSTGREST_KEY = HARNESS.service_role_jwt if HARNESS else None
 pytestmark = pytest.mark.skipif(
     not POSTGREST_URL or not POSTGREST_KEY,
-    reason="ticket20 local PostgREST service is not configured",
+    reason="owned PostgreSQL harness is not configured",
 )
 
 

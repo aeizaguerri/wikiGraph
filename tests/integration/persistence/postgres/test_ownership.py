@@ -20,9 +20,12 @@ from tests.support.mediawiki import FakeMediaWiki
 from wikigraph.crawler import CrawlRequest
 from wikigraph.runs import RunStatus, SupabaseCrawlRunStore
 
-URL = os.environ.get("WIKIGRAPH_TICKET28_POSTGREST_URL")
-JWT = os.environ.get("WIKIGRAPH_TICKET28_SERVICE_ROLE_JWT")
-pytestmark = pytest.mark.skipif(not URL or not JWT, reason="ticket29 local database credentials are not configured")
+from tests.support.postgres import load_postgres_harness, run_postgres_admin_sql
+
+HARNESS = load_postgres_harness()
+URL = HARNESS.url if HARNESS else None
+JWT = HARNESS.service_role_jwt if HARNESS else None
+pytestmark = pytest.mark.skipif(not URL or not JWT, reason="owned PostgreSQL harness is not configured")
 
 
 def _headers() -> dict[str, str]:
@@ -36,12 +39,7 @@ def _rpc(name: str, args: dict[str, object]) -> httpx.Response:
 
 
 def _sql(query: str) -> str:
-    result = subprocess.run(
-        ["podman", "exec", "-i", "ticket28-postgres", "psql", "-X", "-A", "-t",
-         "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "wikigraph"],
-        input=query, text=True, capture_output=True, check=True,
-    )
-    return result.stdout.strip()
+    return run_postgres_admin_sql(query).stdout.strip()
 
 
 def _new_run() -> tuple[str, str, int]:
@@ -209,8 +207,3 @@ def test_legacy_null_owner_is_not_claimed_and_operator_repair_is_guarded_and_aud
     assert _sql(f"select count(*) from public.crawl_run_ownership_repairs where run_id='{run_id}'") == "1"
     with pytest.raises(subprocess.CalledProcessError):
         _sql(f"select public.repair_legacy_crawl_run('{run_id}','{updated}'::timestamptz,'stale second repair')")
-
-
-def test_missing_postgrest_is_a_connection_error_not_a_success() -> None:
-    with pytest.raises(httpx.ConnectError):
-        httpx.get("http://127.0.0.1:1/crawl_runs", timeout=1)

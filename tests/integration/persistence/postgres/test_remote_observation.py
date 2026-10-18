@@ -15,9 +15,12 @@ from wikigraph.app import create_app
 from wikigraph.governor import GlobalWikimediaGovernor
 from wikigraph.runs import SupabaseCrawlRunStore
 
-URL = os.environ.get("WIKIGRAPH_TICKET29_POSTGREST_URL")
-KEY = os.environ.get("WIKIGRAPH_TICKET29_POSTGREST_KEY")
-pytestmark = pytest.mark.skipif(not URL or not KEY, reason="ticket29 local PostgREST is not configured")
+from tests.support.postgres import load_postgres_harness
+
+HARNESS = load_postgres_harness()
+URL = HARNESS.url if HARNESS else None
+KEY = HARNESS.service_role_jwt if HARNESS else None
+pytestmark = pytest.mark.skipif(not URL or not KEY, reason="owned PostgreSQL harness is not configured")
 
 
 def _store() -> SupabaseCrawlRunStore:

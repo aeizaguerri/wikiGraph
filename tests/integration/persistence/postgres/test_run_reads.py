@@ -12,10 +12,13 @@ import uuid
 import httpx
 import pytest
 
-URL = os.environ.get("WIKIGRAPH_TICKET28_POSTGREST_URL")
-JWT = os.environ.get("WIKIGRAPH_TICKET28_SERVICE_ROLE_JWT")
+from tests.support.postgres import load_postgres_harness, run_postgres_admin_sql, start_postgres_admin_sql
+
+HARNESS = load_postgres_harness()
+URL = HARNESS.url if HARNESS else None
+JWT = HARNESS.service_role_jwt if HARNESS else None
 pytestmark = pytest.mark.skipif(
-    URL != "http://127.0.0.1:33028" or not JWT,
+    not URL or not JWT,
     reason="ticket31 disposable loopback PostgREST credentials are required",
 )
 
@@ -52,12 +55,7 @@ def _read(run_id: str, view: str = "state") -> httpx.Response:
 
 
 def _sql(query: str) -> str:
-    result = subprocess.run(
-        ["podman", "exec", "-i", "ticket28-postgres", "psql", "-X", "-A", "-t",
-         "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "wikigraph"],
-        input=query, text=True, capture_output=True, check=True,
-    )
-    return result.stdout.strip()
+    return run_postgres_admin_sql(query).stdout.strip()
 
 
 def _complete(run_id: str, token: str, graph: dict[str, object]) -> None:
@@ -287,14 +285,8 @@ def _locked_read_after_update(run_id: str, change: str) -> httpx.Response:
         f"where run_id='{run_id}' for update; {change}; "
         "select 'locked'; select pg_sleep(2); commit;"
     )
-    locker = subprocess.Popen(
-        ["podman", "exec", "-i", "ticket28-postgres", "psql", "-X", "-q", "-A", "-t",
-         "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "wikigraph"],
-        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-    )
-    assert locker.stdin is not None and locker.stdout is not None
-    locker.stdin.write(lock_sql)
-    locker.stdin.close()
+    locker = start_postgres_admin_sql(lock_sql)
+    assert locker.stdout is not None
     assert locker.stdout.readline().strip() == run_id
     assert locker.stdout.readline().strip() == "locked"
 
@@ -368,14 +360,8 @@ def test_healthy_read_does_not_wait_for_held_row_lock() -> None:
         "begin; select run_id from public.crawl_runs "
         f"where run_id='{run_id}' for update; select 'locked'; select pg_sleep(2); commit;"
     )
-    locker = subprocess.Popen(
-        ["podman", "exec", "-i", "ticket28-postgres", "psql", "-X", "-q", "-A", "-t",
-         "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "wikigraph"],
-        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-    )
-    assert locker.stdin is not None and locker.stdout is not None
-    locker.stdin.write(lock_sql)
-    locker.stdin.close()
+    locker = start_postgres_admin_sql(lock_sql)
+    assert locker.stdout is not None
     assert locker.stdout.readline().strip() == run_id
     assert locker.stdout.readline().strip() == "locked"
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:

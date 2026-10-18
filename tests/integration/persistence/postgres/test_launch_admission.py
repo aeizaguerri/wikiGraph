@@ -1,27 +1,26 @@
-"""Atomic launch admission against a real PostgREST/Postgres service.
+"""Atomic launch admission against the owned local PostgREST service.
 
-Run with an isolated local service and a valid PostgREST JWT:
-WIKIGRAPH_TICKET27_POSTGREST_URL=http://127.0.0.1:33001 \
-WIKIGRAPH_TICKET27_POSTGREST_KEY="$LOCAL_ANON_JWT" \
-uv run pytest tests/integration/persistence/postgres/test_launch_admission.py -q
+Run through ``scripts/test_postgres.py`` with this file as the explicit child.
 """
 
 from __future__ import annotations
 
-import os
 import uuid
 
 import httpx
 import pytest
 
-URL = os.environ.get("WIKIGRAPH_TICKET27_POSTGREST_URL")
-KEY = os.environ.get("WIKIGRAPH_TICKET27_POSTGREST_KEY")
+from tests.support.postgres import load_postgres_harness
+
+HARNESS = load_postgres_harness()
+URL = HARNESS.url if HARNESS else None
+KEY = HARNESS.service_role_jwt if HARNESS else None
 pytestmark = pytest.mark.skipif(
-    not URL or not KEY, reason="ticket27 real PostgREST service is not configured"
+    not URL or not KEY, reason="owned PostgreSQL harness is not configured"
 )
 
 
-def test_real_atomic_per_ip_admission() -> None:
+def test_per_ip_limit_rejects_second_launch() -> None:
     assert URL is not None
     assert KEY is not None
     ip_hash = uuid.uuid4().hex + uuid.uuid4().hex
@@ -36,5 +35,7 @@ def test_real_atomic_per_ip_admission() -> None:
     with httpx.Client() as client:
         first = client.post(f"{URL}/rpc/admit_crawl_launch", headers=headers, json=limits)
         second = client.post(f"{URL}/rpc/admit_crawl_launch", headers=headers, json=limits)
-    assert first.json()[0]["admitted"]
+    assert first.status_code == 200, first.text
+    assert second.status_code == 200, second.text
+    assert first.json()[0]["admitted"] is True
     assert second.json()[0]["code"] == "launch_rate_limited"

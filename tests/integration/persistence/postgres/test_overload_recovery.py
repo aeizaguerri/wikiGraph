@@ -12,8 +12,11 @@ from wikigraph.governor import GlobalWikimediaGovernor, SupabaseWikimediaAdmissi
 from wikigraph.response_cache import InMemoryResponseCache
 from wikigraph.runs import SupabaseCrawlRunStore
 
-REAL_URL = os.environ.get("WIKIGRAPH_TICKET23_POSTGREST_URL")
-REAL_KEY = os.environ.get("WIKIGRAPH_TICKET23_POSTGREST_KEY")
+from tests.support.postgres import load_postgres_harness
+
+HARNESS = load_postgres_harness()
+REAL_URL = HARNESS.url if HARNESS else None
+REAL_KEY = HARNESS.service_role_jwt if HARNESS else None
 
 
 class PublicLifecycleTransport(httpx.AsyncBaseTransport):

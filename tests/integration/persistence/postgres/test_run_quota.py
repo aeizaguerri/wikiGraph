@@ -14,10 +14,13 @@ from wikigraph.governor import GlobalWikimediaGovernor, SupabaseWikimediaAdmissi
 from wikigraph.response_cache import InMemoryResponseCache
 from wikigraph.runs import PersistenceError, RunStatus, SupabaseCrawlRunStore
 
-URL = os.environ.get("WIKIGRAPH_TICKET28_POSTGREST_URL")
-JWT = os.environ.get("WIKIGRAPH_TICKET28_SERVICE_ROLE_JWT")
+from tests.support.postgres import load_postgres_harness
+
+HARNESS = load_postgres_harness()
+URL = HARNESS.url if HARNESS else None
+JWT = HARNESS.service_role_jwt if HARNESS else None
 pytestmark = pytest.mark.skipif(
-    URL != "http://127.0.0.1:33028" or not JWT,
+    not URL or not JWT,
     reason="ticket28 disposable loopback PostgREST credentials are required",
 )
 
@@ -122,7 +125,7 @@ async def test_exhaustion_is_stable_failed_terminal_without_graph_or_retry() -> 
         run = store.start_run(CrawlRequest("Seed", 1, "en", node_cap=2), transport)
         await asyncio.wait_for(run.wait_done(), 30)
         assert run.status is RunStatus.FAILED
-        assert run.error == "This Crawl run has reached its upstream request limit."
+        assert run.error == "The crawl run failed."
         assert run.result is None
         assert len(transport.requests) == 1
         async with httpx.AsyncClient(timeout=10) as db:
@@ -137,7 +140,9 @@ async def test_exhaustion_is_stable_failed_terminal_without_graph_or_retry() -> 
         async with httpx.AsyncClient(timeout=10) as db:
             unchanged = await _row(db, run.id)
             assert unchanged["status"] == "failed"
+            assert unchanged["error"] == "The crawl run failed."
             assert unchanged["attempts_used"] == 1
+            assert unchanged["graph"] is None
     finally:
         await store.shutdown()
         await governor.shutdown()

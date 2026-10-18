@@ -1,8 +1,8 @@
-"""Ticket 24 acceptance against the real migrated response-cache schema.
+"""Durable response-cache contracts against the owned migrated PostgREST schema.
 
-Run with an isolated PostgREST service and the unique ticket-24 environment:
-WIKIGRAPH_TICKET24_POSTGREST_URL=http://127.0.0.1:33024 \
-WIKIGRAPH_TICKET24_POSTGREST_KEY=<ephemeral-local-jwt> \
+Use scripts/test_postgres.py with an explicit child test command:
+owned local harness URL \
+owned service-role JWT \
 uv run pytest tests/integration/persistence/postgres/test_response_cache.py -q
 """
 
@@ -16,11 +16,14 @@ import pytest
 
 from wikigraph.response_cache import ResponseCacheKey, SupabaseResponseCache
 
-POSTGREST_URL = os.environ.get("WIKIGRAPH_TICKET24_POSTGREST_URL")
-POSTGREST_KEY = os.environ.get("WIKIGRAPH_TICKET24_POSTGREST_KEY")
+from tests.support.postgres import load_postgres_harness
+
+HARNESS = load_postgres_harness()
+POSTGREST_URL = HARNESS.url if HARNESS else None
+POSTGREST_KEY = HARNESS.service_role_jwt if HARNESS else None
 pytestmark = pytest.mark.skipif(
     not POSTGREST_URL or not POSTGREST_KEY,
-    reason="ticket24 local PostgREST service is not configured",
+    reason="owned PostgreSQL harness is not configured",
 )
 
 

@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
-import os
-import subprocess
+import json
 import uuid
+from datetime import datetime, timedelta, timezone
 
 import httpx
 import pytest
@@ -14,12 +13,14 @@ from wikigraph.app import create_app
 from wikigraph.runs import SupabaseCrawlRunStore
 
 
-POSTGREST_URL = os.environ.get("WIKIGRAPH_TICKET26_POSTGREST_URL")
-POSTGREST_KEY = os.environ.get("WIKIGRAPH_TICKET26_POSTGREST_KEY")
-LOCAL_PSQL_ENABLED = os.environ.get("WIKIGRAPH_TICKET26_LOCAL_PSQL") == "1"
+from tests.support.postgres import load_postgres_harness, run_postgres_admin_sql
+
+HARNESS = load_postgres_harness()
+POSTGREST_URL = HARNESS.url if HARNESS else None
+POSTGREST_KEY = HARNESS.service_role_jwt if HARNESS else None
 pytestmark = pytest.mark.skipif(
-    not POSTGREST_URL or not POSTGREST_KEY or not LOCAL_PSQL_ENABLED,
-    reason="ticket26 local PostgREST service and local psql fixture opt-in are required",
+    not POSTGREST_URL or not POSTGREST_KEY,
+    reason="owned PostgreSQL harness is not configured",
 )
 
 
@@ -33,61 +34,99 @@ def _headers() -> dict[str, str]:
     }
 
 
-def _seed_historical_runs(completed_id: str, incomplete_id: str) -> None:
-    """Seed fixture rows through the isolated local database admin connection."""
+def _seed_expiring_runs(
+    completed_id: str,
+    incomplete_id: str,
+    completed_expiry: datetime,
+    incomplete_expiry: datetime,
+) -> None:
+    """Seed controlled expiry fixtures through the current owned admin connection."""
+    completed_progress = {
+        "crawled": 2,
+        "discovered": 2,
+        "depth": 1,
+        "recent": ["Finished", "Related"],
+    }
+    checkpoint = {
+        "level": 1,
+        "frontier": ["Related"],
+        "batch_start": 0,
+        "next_frontier": [],
+        "current_batch": [],
+        "continuation": "retention-checkpoint",
+        "nodes": [{"title": "Finished", "level": 0, "is_seed": True}],
+        "edges": [],
+        "truncated": False,
+        "crawled": 1,
+        "recent": ["Finished"],
+    }
+    completed_graph = {
+        "nodes": [
+            {"title": "Finished", "level": 0, "is_seed": True},
+            {"title": "Related", "level": 1, "is_seed": False},
+        ],
+        "edges": [{"source": "Finished", "target": "Related"}],
+        "truncated": False,
+        "crawled": 2,
+        "discovered": 2,
+        "community_ids": {"Finished": 0, "Related": 0},
+        "community_count": 1,
+        "modularity": 0.0,
+    }
+    incomplete_progress = {
+        "crawled": 1,
+        "discovered": 2,
+        "depth": 1,
+        "recent": ["Interrupted", "Related"],
+    }
+    incomplete_checkpoint = {
+        **checkpoint,
+        "nodes": [
+            {"title": "Interrupted", "level": 0, "is_seed": True},
+            {"title": "Related", "level": 1, "is_seed": False},
+        ],
+        "edges": [{"source": "Interrupted", "target": "Related"}],
+        "recent": ["Interrupted", "Related"],
+    }
     sql = f"""
         INSERT INTO public.crawl_runs
             (run_id, seed, language, depth, node_cap, status, progress, checkpoint,
              graph, completed_at, expires_at, error)
         VALUES
             ('{completed_id}', 'Finished', 'en', 1, 500, 'completed',
-             '{{"crawled":1,"discovered":1}}'::jsonb,
-             '{{"secret":"checkpoint"}}'::jsonb,
-             '{{"nodes":[{{"title":"Finished","level":0,"is_seed":true}}],"edges":[],"truncated":false,"crawled":1,"discovered":1,"community_ids":{{"Finished":0}},"community_count":1,"modularity":0.0}}'::jsonb,
-             '2026-09-15T12:00:00Z', '2026-09-22T12:00:00Z', NULL),
+             '{json.dumps(completed_progress)}'::jsonb,
+             '{json.dumps(checkpoint)}'::jsonb,
+             '{json.dumps(completed_graph)}'::jsonb,
+             '{(completed_expiry - timedelta(days=7)).isoformat()}', '{completed_expiry.isoformat()}', NULL),
             ('{incomplete_id}', 'Interrupted', 'en', 1, 500, 'recoverable',
-             '{{"crawled":1,"discovered":2}}'::jsonb,
-             '{{"secret":"checkpoint"}}'::jsonb,
-             NULL, NULL, '2026-09-23T12:00:00Z', 'interrupted');
+             '{json.dumps(incomplete_progress)}'::jsonb,
+             '{json.dumps(incomplete_checkpoint)}'::jsonb,
+             NULL, NULL, '{incomplete_expiry.isoformat()}', 'interrupted');
     """
-    subprocess.run(
-        [
-            "podman", "exec", "-i", "ticket28-postgres", "psql", "-X",
-            "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "wikigraph",
-        ],
-        input=sql,
-        text=True,
-        capture_output=True,
-        check=True,
-    )
+    run_postgres_admin_sql(sql)
 
 
-def _delete_historical_runs(completed_id: str, incomplete_id: str) -> None:
+def _delete_expiring_runs(completed_id: str, incomplete_id: str) -> None:
     sql = (
         "DELETE FROM public.crawl_runs "
         f"WHERE run_id IN ('{completed_id}', '{incomplete_id}');"
     )
-    subprocess.run(
-        [
-            "podman", "exec", "-i", "ticket28-postgres", "psql", "-X",
-            "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "wikigraph",
-        ],
-        input=sql,
-        text=True,
-        capture_output=True,
-        check=True,
-    )
+    run_postgres_admin_sql(sql)
 
 
 async def test_cleanup_preserves_tombstones_metrics_and_independent_cache() -> None:
     assert POSTGREST_URL is not None
-    now = datetime(2026, 9, 22, 12, tzinfo=timezone.utc)
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    completed_expiry = now + timedelta(minutes=1)
+    incomplete_expiry = completed_expiry + timedelta(minutes=1)
     completed_id = uuid.uuid4().hex
     incomplete_id = uuid.uuid4().hex
     cache_key = uuid.uuid4().hex
     database = httpx.Client(timeout=10.0)
     try:
-        _seed_historical_runs(completed_id, incomplete_id)
+        _seed_expiring_runs(
+            completed_id, incomplete_id, completed_expiry, incomplete_expiry
+        )
         cache = {
             "cache_key": cache_key,
             "kind": "redirects",
@@ -96,9 +135,9 @@ async def test_cleanup_preserves_tombstones_metrics_and_independent_cache() -> N
             "continuation": "initial",
             "schema_version": "1",
             "response": {"query": {"pages": []}},
-            "fetched_at": "2026-09-22T11:59:00Z",
-            "expires_at": "2026-09-29T11:59:00Z",
-            "last_accessed_at": "2026-09-22T11:59:00Z",
+            "fetched_at": now.isoformat(),
+            "expires_at": (now + timedelta(days=7)).isoformat(),
+            "last_accessed_at": now.isoformat(),
         }
         database.post(
             f"{POSTGREST_URL}/upstream_response_cache", headers=_headers(), json=cache
@@ -112,13 +151,7 @@ async def test_cleanup_preserves_tombstones_metrics_and_independent_cache() -> N
             ).json()
         }
 
-        current = [now - timedelta(seconds=1)]
-        store = SupabaseCrawlRunStore(
-            POSTGREST_URL,
-            POSTGREST_KEY,
-            rest_path="",
-            clock=lambda: current[0],
-        )
+        store = SupabaseCrawlRunStore(POSTGREST_URL, POSTGREST_KEY, rest_path="")
         app = create_app(run_store=store)
         async with app.router.lifespan_context(app):
             async with httpx.AsyncClient(
@@ -126,12 +159,12 @@ async def test_cleanup_preserves_tombstones_metrics_and_independent_cache() -> N
             ) as client:
                 retained = await client.get(f"/api/runs/{completed_id}/graph")
                 assert retained.status_code == 200
-                current[0] = now
+                assert store.cleanup_expired(completed_expiry) == 1
                 for path in ("", "/preview", "/graph"):
                     expired = await client.get(f"/api/runs/{completed_id}{path}")
                     assert expired.status_code == 410
                     assert expired.json()["error"]["code"] == "run_expired"
-                current[0] = now + timedelta(days=1)
+                assert store.cleanup_expired(incomplete_expiry) == 1
                 for path in ("", "/preview", "/graph"):
                     expired = await client.get(f"/api/runs/{incomplete_id}{path}")
                     assert expired.status_code == 410
@@ -162,10 +195,14 @@ async def test_cleanup_preserves_tombstones_metrics_and_independent_cache() -> N
             headers=_headers(),
         ).json()
         by_day = {row["metric_day"]: row["run_count"] for row in metrics}
-        assert by_day["2026-09-22"] == existing_metrics.get("2026-09-22", 0) + 1
-        assert by_day["2026-09-23"] == existing_metrics.get("2026-09-23", 0) + 1
+        expected_by_day: dict[str, int] = {}
+        for expiry in (completed_expiry, incomplete_expiry):
+            day = expiry.date().isoformat()
+            expected_by_day[day] = expected_by_day.get(day, 0) + 1
+        for day, added in expected_by_day.items():
+            assert by_day[day] == existing_metrics.get(day, 0) + added
     finally:
-        _delete_historical_runs(completed_id, incomplete_id)
+        _delete_expiring_runs(completed_id, incomplete_id)
         database.delete(
             f"{POSTGREST_URL}/upstream_response_cache",
             params={"cache_key": f"eq.{cache_key}"},
