@@ -2,19 +2,20 @@
 
 from __future__ import annotations
 
-import os
-
 import httpx
 import pytest
 
+from tests.support.postgres import load_postgres_harness
 
-POSTGREST_URL = os.environ.get("WIKIGRAPH_TICKET28_POSTGREST_URL")
-SERVICE_ROLE_JWT = os.environ.get("WIKIGRAPH_TICKET28_SERVICE_ROLE_JWT")
-ANON_JWT = os.environ.get("WIKIGRAPH_TICKET28_ANON_JWT")
-AUTHENTICATED_JWT = os.environ.get("WIKIGRAPH_TICKET28_AUTHENTICATED_JWT")
+
+HARNESS = load_postgres_harness()
+POSTGREST_URL = HARNESS.url if HARNESS else None
+SERVICE_ROLE_JWT = HARNESS.service_role_jwt if HARNESS else None
+ANON_JWT = HARNESS.anon_jwt if HARNESS else None
+AUTHENTICATED_JWT = HARNESS.authenticated_jwt if HARNESS else None
 pytestmark = pytest.mark.skipif(
-    not all((POSTGREST_URL, SERVICE_ROLE_JWT, ANON_JWT, AUTHENTICATED_JWT)),
-    reason="ticket28 role-shaped PostgREST credentials are not configured",
+    HARNESS is None,
+    reason="owned local PostgreSQL harness is not configured",
 )
 
 TABLES = (
@@ -91,7 +92,9 @@ def test_service_role_can_read_runtime_schema_and_call_required_rpcs() -> None:
 @pytest.mark.parametrize("role_env", ["ANON_JWT", "AUTHENTICATED_JWT"])
 def test_browser_roles_cannot_read_private_runtime_tables(role_env: str) -> None:
     assert POSTGREST_URL is not None
-    token = os.environ["WIKIGRAPH_TICKET28_" + role_env]
+    assert HARNESS is not None
+    token = ANON_JWT if role_env == "ANON_JWT" else AUTHENTICATED_JWT
+    assert token is not None
     database = httpx.Client(timeout=10.0)
     try:
         for table in TABLES:

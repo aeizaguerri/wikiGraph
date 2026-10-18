@@ -79,7 +79,16 @@ Python API and module integration tests use local deterministic fakes/stubs for 
 uv run pytest tests/integration
 ```
 
-This includes `tests/integration/persistence/postgres` tests, which are explicitly optional: each uses its existing `WIKIGRAPH_TICKETxx_*` configuration/credential guards and skips when required values are absent. Set only the existing test-specific variables described by those tests when using an authorized local PostgREST/database harness; do not place credentials in source control. A skipped credential-gated check is not a database pass.
+The PostgreSQL/PostgREST role smoke can be run against a fresh owned local harness:
+
+```sh
+.venv/bin/python scripts/test_postgres.py -- \
+  .venv/bin/python -m pytest -q tests/integration/persistence/postgres/test_runtime_roles.py
+```
+
+`scripts/test_postgres.py` uses the already-pinned PostgreSQL 16 Alpine and PostgREST v12.2.3 images, binds the dynamically allocated PostgREST port only to loopback, applies the checked-in migrations to a fresh database, and injects role-shaped service, anon, and authenticated JWTs into the explicit child command. It refuses an implicit/missing child command, does not interpolate through a shell, removes inherited `WIKIGRAPH_*`, `SUPABASE_*`, and database connection variables from that child, and cleans only resources named for its fresh run. State is confined to `odd/test-postgres/<run-id>`. Do not pass production credentials or point the harness at an external database; it does not accept an external database URL. Podman must be available and the two exact images must already be available locally; the runner does not pull images or upgrade versions. The administrative PostgreSQL connection is used only while provisioning the owned database; app role JWTs are separately signed as `service_role`, `anon`, and `authenticated`.
+
+The rest of `tests/integration/persistence/postgres` remains explicitly optional and uses its existing test-specific configuration/credential guards. Ordinary pytest without the owned runner skips the runtime-role smoke; invoking the runner requires its child command, and the migrated role tests validate the runner's run receipt and loopback URL before use. A skipped credential-gated check is not a database pass. This runner and role smoke do not imply that all 77 previously skipped database cases ran; the remaining database-check adaptation is separate work.
 
 Browser E2E requires the frontend build and Chromium:
 
