@@ -1295,11 +1295,20 @@ def _snapshot_state_from_row(row: dict[str, Any]) -> RunStateSnapshot:
             raise ValueError("unexpected run snapshot fields")
         status = RunStatus(row["status"])
         progress = row["progress"]
-        if not isinstance(progress, dict):
-            raise ValueError("invalid progress")
-        recent = progress["recent"]
-        if not isinstance(recent, list) or not all(isinstance(item, str) for item in recent):
-            raise ValueError("invalid recent progress")
+        if progress is None and status is RunStatus.EXPIRED:
+            state_progress = RunProgressSnapshot(0, 0, 0, ())
+        else:
+            if not isinstance(progress, dict):
+                raise ValueError("invalid progress")
+            recent = progress["recent"]
+            if not isinstance(recent, list) or not all(isinstance(item, str) for item in recent):
+                raise ValueError("invalid recent progress")
+            state_progress = RunProgressSnapshot(
+                crawled=_snapshot_int(progress["crawled"]),
+                discovered=_snapshot_int(progress["discovered"]),
+                depth=_snapshot_int(progress["depth"]),
+                recent=tuple(recent),
+            )
         retry_value = row["retry_state"]
         if retry_value is not None and not isinstance(retry_value, dict):
             raise ValueError("invalid retry state")
@@ -1338,11 +1347,7 @@ def _snapshot_state_from_row(row: dict[str, Any]) -> RunStateSnapshot:
             truncated = None
         return RunStateSnapshot(
             id=_snapshot_string(row["run_id"]), request=request, status=status,
-            progress=RunProgressSnapshot(
-                crawled=_snapshot_int(progress["crawled"]),
-                discovered=_snapshot_int(progress["discovered"]),
-                depth=_snapshot_int(progress["depth"]), recent=tuple(recent),
-            ),
+            progress=state_progress,
             error=error, retry_state=retry, expires_at=expires,
             owner_token=owner, owner_version=version, truncated=truncated,
         )

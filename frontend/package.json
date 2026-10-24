@@ -5,7 +5,8 @@
   "type": "module",
   "description": "The wikiGraph v2 graph view: full-screen dark canvas over the crawl API.",
   "scripts": {
-    "build": "vite build"
+    "build": "vite build",
+    "test": "node --test tests/unit/*.test.js"
   },
   "dependencies": {
     "graphology": "^0.26.0",
